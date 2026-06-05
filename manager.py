@@ -546,6 +546,9 @@ class ScriptRow(Gtk.ListBoxRow):
     _shared_running_ids: set = set()
     _on_run = None
     _on_stop = None
+    _on_select_script_settings = None
+    _on_select_script_logs = None
+    _on_open_terminal = None
 
     def __init__(self, script: dict):
         super().__init__()
@@ -621,8 +624,32 @@ class ScriptRow(Gtk.ListBoxRow):
         if ScriptRow._on_run:
             run_btn.connect("clicked", lambda _, s=self.script: ScriptRow._on_run(s))
 
-        self._action_box.pack_start(run_btn, False, False, 0)
-        self._action_box.pack_start(stop_btn, False, False, 0)
+        term_btn = Gtk.Button()
+        term_btn.set_image(Gtk.Image.new_from_icon_name("utilities-terminal-symbolic", Gtk.IconSize.MENU))
+        term_btn.get_style_context().add_class("btn-icon")
+        term_btn.set_tooltip_text("Open Terminal")
+        if ScriptRow._on_open_terminal:
+            term_btn.connect("clicked", lambda _, s=self.script: ScriptRow._on_open_terminal(s))
+
+        logs_btn = Gtk.Button()
+        logs_btn.set_image(Gtk.Image.new_from_icon_name("text-x-generic-symbolic", Gtk.IconSize.MENU))
+        logs_btn.get_style_context().add_class("btn-icon")
+        logs_btn.set_tooltip_text("Logs")
+        if ScriptRow._on_select_script_logs:
+            logs_btn.connect("clicked", lambda _, s=self.script: ScriptRow._on_select_script_logs(s))
+
+        settings_btn = Gtk.Button()
+        settings_btn.set_image(Gtk.Image.new_from_icon_name("emblem-system-symbolic", Gtk.IconSize.MENU))
+        settings_btn.get_style_context().add_class("btn-icon")
+        settings_btn.set_tooltip_text("Settings")
+        if ScriptRow._on_select_script_settings:
+            settings_btn.connect("clicked", lambda _, s=self.script: ScriptRow._on_select_script_settings(s))
+
+        self._action_box.pack_end(stop_btn, False, False, 0)
+        self._action_box.pack_end(run_btn, False, False, 0)
+        self._action_box.pack_end(term_btn, False, False, 0)
+        self._action_box.pack_end(logs_btn, False, False, 0)
+        self._action_box.pack_end(settings_btn, False, False, 0)
 
         # Badges
         port_str = self.script.get("port", "").strip()
@@ -2497,6 +2524,9 @@ class ManagerWindow(Gtk.ApplicationWindow):
         self._load_list()
         ScriptRow._on_run = self._run_script
         ScriptRow._on_stop = self._stop_single_script
+        ScriptRow._on_select_script_settings = self._open_script_settings
+        ScriptRow._on_select_script_logs = self._open_script_logs
+        ScriptRow._on_open_terminal = self._open_terminal
         self.show_all()
         # Select first script if available
         first = self.listbox.get_row_at_index(0)
