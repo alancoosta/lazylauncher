@@ -1857,9 +1857,9 @@ class ScriptForm(Gtk.Box):
         dialog.set_current_folder(str(Path(start).expanduser()))
         if dialog.run() == Gtk.ResponseType.OK:
             chosen = dialog.get_filename()
-            self.wd_entry.set_text(chosen)
             if not self.name_entry.get_text().strip():
                 self.name_entry.set_text(Path(chosen).name)
+            self.wd_entry.set_text(chosen)
         dialog.destroy()
 
     def _browse_icon(self, _widget):
