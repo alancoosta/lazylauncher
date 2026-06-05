@@ -291,6 +291,14 @@ button.btn-success {
 button.btn-success:hover {
     background-color: #2ecc71;
 }
+button.btn-warning {
+    background-color: #e67e22;
+    color: #ffffff;
+    border-radius: 8px;
+}
+button.btn-warning:hover {
+    background-color: #f39c12;
+}
 button.btn-secondary {
     background-color: #35312b;
     color: #c4bdb5;
@@ -546,6 +554,7 @@ class ScriptRow(Gtk.ListBoxRow):
     _shared_running_ids: set = set()
     _on_run = None
     _on_stop = None
+    _on_restart = None
     _on_select_script_settings = None
     _on_select_script_logs = None
     _on_open_terminal = None
@@ -614,6 +623,14 @@ class ScriptRow(Gtk.ListBoxRow):
         if ScriptRow._on_stop:
             stop_btn.connect("clicked", lambda _, s=self.script: ScriptRow._on_stop(s))
 
+        restart_btn = Gtk.Button()
+        restart_btn.set_image(Gtk.Image.new_from_icon_name("view-refresh-symbolic", Gtk.IconSize.MENU))
+        restart_btn.get_style_context().add_class("btn-icon")
+        restart_btn.set_tooltip_text("Restart")
+        restart_btn.set_sensitive(is_running)
+        if ScriptRow._on_restart:
+            restart_btn.connect("clicked", lambda _, s=self.script: ScriptRow._on_restart(s))
+
         run_btn = Gtk.Button()
         run_btn.set_image(Gtk.Image.new_from_icon_name("media-playback-start-symbolic", Gtk.IconSize.MENU))
         run_btn.get_style_context().add_class("btn-icon")
@@ -646,6 +663,7 @@ class ScriptRow(Gtk.ListBoxRow):
             settings_btn.connect("clicked", lambda _, s=self.script: ScriptRow._on_select_script_settings(s))
 
         self._action_box.pack_end(stop_btn, False, False, 0)
+        self._action_box.pack_end(restart_btn, False, False, 0)
         self._action_box.pack_end(run_btn, False, False, 0)
         self._action_box.pack_end(term_btn, False, False, 0)
         self._action_box.pack_end(logs_btn, False, False, 0)
@@ -687,8 +705,10 @@ class GroupRow(Gtk.ListBoxRow):
     """Sidebar row for a group – mirrors ScriptRow layout with script sub-rows."""
     _on_run_group = None
     _on_stop_group = None
+    _on_restart_group = None
     _on_run_script = None
     _on_stop_script = None
+    _on_restart_script = None
     _on_select_script_settings = None
     _on_select_script_logs = None
     _on_open_terminal = None
@@ -812,6 +832,14 @@ class GroupRow(Gtk.ListBoxRow):
         if GroupRow._on_stop_script:
             s_stop.connect("clicked", lambda _, s=script: GroupRow._on_stop_script(s))
 
+        s_restart = Gtk.Button()
+        s_restart.set_image(Gtk.Image.new_from_icon_name("view-refresh-symbolic", Gtk.IconSize.MENU))
+        s_restart.get_style_context().add_class("btn-icon")
+        s_restart.set_tooltip_text("Restart")
+        s_restart.set_sensitive(is_running)
+        if GroupRow._on_restart_script:
+            s_restart.connect("clicked", lambda _, s=script: GroupRow._on_restart_script(s))
+
         s_run = Gtk.Button()
         s_run.set_image(Gtk.Image.new_from_icon_name("media-playback-start-symbolic", Gtk.IconSize.MENU))
         s_run.get_style_context().add_class("btn-icon")
@@ -844,6 +872,7 @@ class GroupRow(Gtk.ListBoxRow):
             s_settings.connect("clicked", lambda _, s=script: GroupRow._on_select_script_settings(s))
 
         row_box.pack_end(s_stop, False, False, 0)
+        row_box.pack_end(s_restart, False, False, 0)
         row_box.pack_end(s_run, False, False, 0)
         row_box.pack_end(s_term, False, False, 0)
         row_box.pack_end(s_logs, False, False, 0)
@@ -880,6 +909,14 @@ class GroupRow(Gtk.ListBoxRow):
         if GroupRow._on_run_group:
             run_btn.connect("clicked", lambda _, g=self.group: GroupRow._on_run_group(g))
 
+        restart_btn = Gtk.Button()
+        restart_btn.set_image(Gtk.Image.new_from_icon_name("view-refresh-symbolic", Gtk.IconSize.MENU))
+        restart_btn.get_style_context().add_class("btn-icon")
+        restart_btn.set_tooltip_text("Restart All")
+        restart_btn.set_sensitive(any_running)
+        if GroupRow._on_restart_group:
+            restart_btn.connect("clicked", lambda _, g=self.group: GroupRow._on_restart_group(g))
+
         stop_btn = Gtk.Button()
         stop_btn.set_image(Gtk.Image.new_from_icon_name("media-playback-stop-symbolic", Gtk.IconSize.MENU))
         stop_btn.get_style_context().add_class("btn-icon")
@@ -889,6 +926,7 @@ class GroupRow(Gtk.ListBoxRow):
             stop_btn.connect("clicked", lambda _, g=self.group: GroupRow._on_stop_group(g))
 
         self._action_box.pack_start(run_btn, False, False, 0)
+        self._action_box.pack_start(restart_btn, False, False, 0)
         self._action_box.pack_start(stop_btn, False, False, 0)
 
         # Count badge
@@ -940,7 +978,7 @@ class GroupRow(Gtk.ListBoxRow):
 class ScriptForm(Gtk.Box):
     """Right-hand panel - shows when a script is selected."""
 
-    def __init__(self, on_save, on_delete, on_run, on_duplicate=None, on_stop=None):
+    def __init__(self, on_save, on_delete, on_run, on_duplicate=None, on_stop=None, on_restart=None):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         self.set_name("form-panel")
         self._on_save   = on_save
@@ -948,6 +986,7 @@ class ScriptForm(Gtk.Box):
         self._on_run    = on_run
         self._on_duplicate = on_duplicate
         self._on_stop   = on_stop
+        self._on_restart = on_restart
         self._script    = None
         self._loading   = False
         self._group_checkboxes = {}
@@ -968,6 +1007,12 @@ class ScriptForm(Gtk.Box):
         self.run_btn.get_style_context().add_class("btn-success")
         self.run_btn.connect("clicked", self._run_current)
         btn_box.pack_start(self.run_btn, False, False, 0)
+
+        self.restart_btn = Gtk.Button(label="↻  Restart")
+        self.restart_btn.get_style_context().add_class("btn-warning")
+        self.restart_btn.connect("clicked", lambda _: self._on_restart and self._on_restart(self._script))
+        self.restart_btn.set_sensitive(False)
+        btn_box.pack_start(self.restart_btn, False, False, 0)
 
         self.stop_btn = Gtk.Button(label=_STOP_LABEL)
         self.stop_btn.get_style_context().add_class("btn-danger")
@@ -1977,13 +2022,14 @@ class ScriptForm(Gtk.Box):
 class GroupForm(Gtk.Box):
     """Right-hand panel — shows when a group is selected."""
 
-    def __init__(self, on_save, on_delete, on_run_all, on_stop_all, on_scripts_changed=None, on_duplicate=None):
+    def __init__(self, on_save, on_delete, on_run_all, on_stop_all, on_scripts_changed=None, on_duplicate=None, on_restart_all=None):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         self.set_name("form-panel")
         self._on_save = on_save
         self._on_delete = on_delete
         self._on_run_all = on_run_all
         self._on_stop_all = on_stop_all
+        self._on_restart_all = on_restart_all
         self._on_scripts_changed = on_scripts_changed
         self._on_duplicate = on_duplicate
         self._group = None
@@ -2006,6 +2052,12 @@ class GroupForm(Gtk.Box):
         self.run_btn.get_style_context().add_class("btn-success")
         self.run_btn.connect("clicked", lambda _: self._on_run_all and self._on_run_all(self._group))
         btn_box.pack_start(self.run_btn, False, False, 0)
+
+        self.restart_btn = Gtk.Button(label="↻  Restart All")
+        self.restart_btn.get_style_context().add_class("btn-warning")
+        self.restart_btn.connect("clicked", lambda _: self._on_restart_all and self._on_restart_all(self._group))
+        self.restart_btn.set_sensitive(False)
+        btn_box.pack_start(self.restart_btn, False, False, 0)
 
         self.stop_btn = Gtk.Button(label="■  Stop All")
         self.stop_btn.get_style_context().add_class("btn-danger")
@@ -2178,6 +2230,7 @@ class GroupForm(Gtk.Box):
         group_scripts = [s for s in cfg.get("scripts", []) if gid in s.get("groups", []) and s.get("enabled", True)]
         any_running = any(s.get("id", "") in running for s in group_scripts)
         self.stop_btn.set_sensitive(any_running)
+        self.restart_btn.set_sensitive(any_running)
         self.run_btn.set_sensitive(len(group_scripts) > 0)
 
 
@@ -2504,6 +2557,7 @@ class ManagerWindow(Gtk.ApplicationWindow):
             on_run=self._run_script,
             on_duplicate=self._duplicate_script,
             on_stop=self._stop_script,
+            on_restart=self._restart_script,
         )
         self.form.set_sensitive(False)
         self.right_stack.add_named(self.form, "script")
@@ -2513,6 +2567,7 @@ class ManagerWindow(Gtk.ApplicationWindow):
             on_delete=self._delete_group_from_form,
             on_run_all=self._run_group,
             on_stop_all=self._stop_group,
+            on_restart_all=self._restart_group,
             on_scripts_changed=self._update_group_row,
             on_duplicate=self._duplicate_group,
         )
@@ -2524,6 +2579,7 @@ class ManagerWindow(Gtk.ApplicationWindow):
         self._load_list()
         ScriptRow._on_run = self._run_script
         ScriptRow._on_stop = self._stop_single_script
+        ScriptRow._on_restart = self._restart_script
         ScriptRow._on_select_script_settings = self._open_script_settings
         ScriptRow._on_select_script_logs = self._open_script_logs
         ScriptRow._on_open_terminal = self._open_terminal
@@ -2583,6 +2639,7 @@ class ManagerWindow(Gtk.ApplicationWindow):
             from tray import _is_port_in_use
             port_busy = _is_port_in_use(int(port_str))
         self.form.stop_btn.set_sensitive(is_running or port_busy)
+        self.form.restart_btn.set_sensitive(is_running)
         if is_running:
             from tray import find_ports_for_pid
             pid = find_script_pid(sid)
@@ -2642,8 +2699,10 @@ class ManagerWindow(Gtk.ApplicationWindow):
         GroupRow._shared_running_ids = running
         GroupRow._on_run_group = self._run_group
         GroupRow._on_stop_group = self._stop_group
+        GroupRow._on_restart_group = self._restart_group
         GroupRow._on_run_script = self._run_script
         GroupRow._on_stop_script = self._stop_single_script
+        GroupRow._on_restart_script = self._restart_script
         GroupRow._on_select_script_settings = self._open_script_settings
         GroupRow._on_select_script_logs = self._open_script_logs
         GroupRow._on_open_terminal = self._open_terminal
@@ -2688,8 +2747,10 @@ class ManagerWindow(Gtk.ApplicationWindow):
         GroupRow._shared_running_ids = running
         GroupRow._on_run_group = self._run_group
         GroupRow._on_stop_group = self._stop_group
+        GroupRow._on_restart_group = self._restart_group
         GroupRow._on_run_script = self._run_script
         GroupRow._on_stop_script = self._stop_single_script
+        GroupRow._on_restart_script = self._restart_script
         GroupRow._on_select_script_settings = self._open_script_settings
         GroupRow._on_select_script_logs = self._open_script_logs
         GroupRow._on_open_terminal = self._open_terminal
@@ -2836,6 +2897,32 @@ class ManagerWindow(Gtk.ApplicationWindow):
         self._refresh_running_badges()
         self._rebuild_groups_view()
         self._show_toast(f"Stopped {count} script(s) from '{group['name']}'")
+
+    def _restart_group(self, group):
+        cfg = load_config()
+        gid = group["id"]
+        running = get_running_ids()
+        from tray import run_script
+        scripts_to_restart = []
+        for script in cfg.get("scripts", []):
+            sid = script.get("id", "")
+            if gid in script.get("groups", []) and sid in running:
+                stop_script(sid)
+                port_str = script.get("port", "").strip()
+                if port_str and port_str.isdigit():
+                    from tray import kill_port
+                    kill_port(int(port_str))
+                scripts_to_restart.append(script)
+        self._refresh_running_badges()
+        self._rebuild_groups_view()
+        def _restart_all():
+            for script in scripts_to_restart:
+                run_script(script)
+            GLib.timeout_add(500, lambda: self._refresh_running_badges() and False)
+            GLib.timeout_add(600, lambda: self._rebuild_groups_view() or False)
+            return False
+        GLib.timeout_add(600, _restart_all)
+        self._show_toast(f"Restarting {len(scripts_to_restart)} script(s) from '{group['name']}' ↻")
 
     def _move_group_up(self, _widget):
         group = self.group_form._group
@@ -3079,6 +3166,13 @@ class ManagerWindow(Gtk.ApplicationWindow):
             kill_port(int(port_str))
         self._refresh_running_badges()
         self._show_toast("Script stopped ■")
+
+    def _restart_script(self, script: dict):
+        if not script:
+            return
+        self._stop_single_script(script)
+        GLib.timeout_add(600, lambda: self._run_script(script) or False)
+        self._show_toast("Script restarting ↻")
 
     # -- tray control ----------------------------------------------------------
 
