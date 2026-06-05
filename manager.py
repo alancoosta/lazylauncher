@@ -664,6 +664,7 @@ class GroupRow(Gtk.ListBoxRow):
     _on_stop_script = None
     _on_select_script_settings = None
     _on_select_script_logs = None
+    _on_open_terminal = None
     _shared_running_ids: set = set()
     _sort_modes: dict = {}  # gid -> sort mode
 
@@ -794,8 +795,15 @@ class GroupRow(Gtk.ListBoxRow):
         if GroupRow._on_run_script:
             s_run.connect("clicked", lambda _, s=script: GroupRow._on_run_script(s))
 
+        s_term = Gtk.Button()
+        s_term.set_image(Gtk.Image.new_from_icon_name("utilities-terminal-symbolic", Gtk.IconSize.MENU))
+        s_term.get_style_context().add_class("btn-icon")
+        s_term.set_tooltip_text("Open Terminal")
+        if GroupRow._on_open_terminal:
+            s_term.connect("clicked", lambda _, s=script: GroupRow._on_open_terminal(s))
+
         s_logs = Gtk.Button()
-        s_logs.set_image(Gtk.Image.new_from_icon_name("utilities-terminal-symbolic", Gtk.IconSize.MENU))
+        s_logs.set_image(Gtk.Image.new_from_icon_name("text-x-generic-symbolic", Gtk.IconSize.MENU))
         s_logs.get_style_context().add_class("btn-icon")
         s_logs.set_tooltip_text("Logs")
         if GroupRow._on_select_script_logs:
@@ -810,6 +818,7 @@ class GroupRow(Gtk.ListBoxRow):
 
         row_box.pack_end(s_stop, False, False, 0)
         row_box.pack_end(s_run, False, False, 0)
+        row_box.pack_end(s_term, False, False, 0)
         row_box.pack_end(s_logs, False, False, 0)
         row_box.pack_end(s_settings, False, False, 0)
 
@@ -1857,7 +1866,8 @@ class ScriptForm(Gtk.Box):
         dialog.set_current_folder(str(Path(start).expanduser()))
         if dialog.run() == Gtk.ResponseType.OK:
             chosen = dialog.get_filename()
-            if not self.name_entry.get_text().strip():
+            current_name = self.name_entry.get_text().strip()
+            if not current_name or current_name == "New Script":
                 self.name_entry.set_text(Path(chosen).name)
             self.wd_entry.set_text(chosen)
         dialog.destroy()
@@ -2606,6 +2616,7 @@ class ManagerWindow(Gtk.ApplicationWindow):
         GroupRow._on_stop_script = self._stop_single_script
         GroupRow._on_select_script_settings = self._open_script_settings
         GroupRow._on_select_script_logs = self._open_script_logs
+        GroupRow._on_open_terminal = self._open_terminal
 
         query = self.groups_search_entry.get_text().lower().strip()
         if query:
@@ -2651,6 +2662,7 @@ class ManagerWindow(Gtk.ApplicationWindow):
         GroupRow._on_stop_script = self._stop_single_script
         GroupRow._on_select_script_settings = self._open_script_settings
         GroupRow._on_select_script_logs = self._open_script_logs
+        GroupRow._on_open_terminal = self._open_terminal
 
         for row in self.groups_listbox.get_children():
             if isinstance(row, GroupRow) and row.group.get("id") == gid:
@@ -2750,6 +2762,13 @@ class ManagerWindow(Gtk.ApplicationWindow):
         self.form.load_script(script)
         self.form.notebook.set_current_page(0)
         self.right_stack.set_visible_child_name("script")
+
+    def _open_terminal(self, script):
+        """Open a terminal in the script's working directory."""
+        cwd = script.get("working_dir", str(Path.home()))
+        cwd = str(Path(cwd).expanduser())
+        import subprocess
+        subprocess.Popen(["x-terminal-emulator"], cwd=cwd)
 
     def _open_script_logs(self, script):
         """Navigate to a script's Logs tab from group view."""
