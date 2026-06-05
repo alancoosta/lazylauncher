@@ -480,7 +480,7 @@ def _save_exit_status(script_id: str, rc: int):
         if ERROR_STATE_FILE.exists():
             with open(ERROR_STATE_FILE) as f:
                 state = json.load(f)
-        if rc == 0:
+        if rc in (0, 130, 143):
             state.pop(script_id, None)
         else:
             state[script_id] = {
