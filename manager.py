@@ -33,12 +33,19 @@ gi.require_version("Gtk", "3.0")
 from gi.repository import Gtk, Gdk, GdkPixbuf, Pango, GLib
 
 # ANSI color code → hex color (adapted for dark background)
-ANSI_COLORS = {
+_ANSI_COLORS_DARK = {
     30: "#555555",  31: "#c0392b",  32: "#27ae60",  33: "#f39c12",
     34: "#3498db",  35: "#8e44ad",  36: "#1abc9c",  37: "#c4bdb5",
     90: "#7a746c",  91: "#e74c3c",  92: "#2ecc71",  93: "#f1c40f",
     94: "#5dade2",  95: "#af7ac5",  96: "#48c9b0",  97: "#ede8e1",
 }
+_ANSI_COLORS_LIGHT = {
+    30: "#1a1a1a",  31: "#a31515",  32: "#1a7a40",  33: "#b06000",
+    34: "#1565c0",  35: "#6a1b9a",  36: "#00796b",  37: "#4a4a4a",
+    90: "#6a6a6a",  91: "#d32f2f",  92: "#2e7d32",  93: "#e0a000",
+    94: "#1976d2",  95: "#7b1fa2",  96: "#00897b",  97: "#2a2a2a",
+}
+ANSI_COLORS = _ANSI_COLORS_DARK  # default, updated at window init
 _ANSI_SGR_RE = re.compile(r'\x1b\[([0-9;]*)m')
 _ANSI_ALL_RE = re.compile(r'\x1b\[[0-9;]*[a-zA-Z]')
 _ANSI_OSC_RE = re.compile(r'\x1b\][^\x07]*\x07')
@@ -98,68 +105,70 @@ CSS = """
     font-family: 'Ubuntu', 'Cantarell', sans-serif;
 }
 
-window {
-    background-color: #1e1b18;
-    color: #ede8e1;
-}
-
 /* -- headerbar -- */
 headerbar {
-    background-color: #252219;
-    border-bottom: 1px solid #35312b;
     padding: 4px 10px;
     min-height: 46px;
 }
 headerbar .title {
-    color: #ede8e1;
     font-size: 14px;
     font-weight: 700;
 }
 headerbar .subtitle {
-    color: #7a746c;
     font-size: 11px;
+    opacity: 0.6;
 }
 
 /* -- sidebar -- */
 #sidebar {
-    background-color: #252219;
-    border-right: 1px solid #35312b;
     min-width: 230px;
 }
 #sidebar row {
     padding: 11px 16px;
-    border-bottom: 1px solid #2c2923;
 }
 #sidebar row:selected {
-    background-color: #332c24;
-    border-left: 3px solid #d4836a;
+    background-color: @theme_base_color;
+    color: @theme_text_color;
+    border-left: 3px solid @theme_selected_bg_color;
 }
-#sidebar row:hover:not(:selected) {
-    background-color: #2a2720;
+#sidebar row:selected label {
+    color: @theme_text_color;
+}
+#sidebar row:selected image {
+    color: @theme_text_color;
+}
+#sidebar row:selected .badge-error,
+#sidebar row:selected .badge-running,
+#sidebar row:selected .badge-port,
+#sidebar row:selected .badge-pinned {
+    color: #ffffff;
+}
+#sidebar row:selected .script-cmd {
+    opacity: 0.5;
 }
 .script-name {
     font-size: 13px;
     font-weight: 600;
-    color: #ede8e1;
 }
 .script-cmd {
     font-size: 11px;
-    color: #6e6860;
+    opacity: 0.5;
 }
 .script-disabled .script-name {
-    color: #4a4640;
+    opacity: 0.35;
 }
+
+/* -- badges (semantic colors kept) -- */
 .badge-pinned {
-    background-color: #d4836a;
-    color: #ffffff;
+    background-color: @theme_selected_bg_color;
+    color: @theme_selected_fg_color;
     border-radius: 4px;
     padding: 2px 7px;
     font-size: 11px;
     font-weight: 700;
 }
 .badge-disabled {
-    background-color: #35312b;
-    color: #7a746c;
+    opacity: 0.5;
     border-radius: 4px;
     padding: 2px 7px;
     font-size: 11px;
@@ -192,70 +201,48 @@ headerbar .subtitle {
 
 /* -- toolbar + search -- */
 #list-toolbar {
-    background-color: #252219;
-    border-bottom: 1px solid #35312b;
     padding: 6px 8px;
 }
 #list-toolbar entry {
-    background-color: #1e1b18;
-    color: #ede8e1;
-    border: 1px solid #3d3830;
     border-radius: 7px;
     padding: 6px 10px;
     font-size: 12px;
 }
-#list-toolbar entry:focus {
-    border-color: #d4836a;
-}
 
 /* -- form panel -- */
-#form-panel {
-    background-color: #1e1b18;
-}
 .form-label {
     font-size: 10px;
     font-weight: 700;
-    color: #7a746c;
+    opacity: 0.6;
     letter-spacing: 0.9px;
     margin-bottom: 4px;
 }
 .form-entry {
-    background-color: #252219;
-    color: #ede8e1;
-    border: 1px solid #3d3830;
     border-radius: 8px;
     padding: 9px 12px;
     font-size: 13px;
 }
-.form-entry:focus {
-    border-color: #d4836a;
-    background-color: #2a2720;
-}
 .form-hint {
     font-size: 11px;
-    color: #4a4640;
+    opacity: 0.45;
     margin-top: 2px;
 }
 .section-header {
     font-size: 10px;
     font-weight: 700;
-    color: #d4836a;
+    color: @theme_selected_bg_color;
     letter-spacing: 1.1px;
-    border-bottom: 1px solid #35312b;
     padding-bottom: 6px;
     margin-top: 20px;
     margin-bottom: 12px;
 }
 
-/* -- buttons: base (applies to all except headerbar controls) -- */
+/* -- buttons -- */
 button:not(.titlebutton) {
     border-radius: 8px;
     padding: 8px 16px;
     font-size: 12px;
     font-weight: 600;
-    border: none;
-    background-color: #35312b;
-    color: #ede8e1;
 }
 headerbar button.titlebutton {
     background: transparent;
@@ -266,70 +253,75 @@ headerbar button.titlebutton {
     min-height: 24px;
 }
 
-/* -- colored button variants -- */
+/* -- colored button variants (semantic) -- */
 button.btn-primary {
-    background-color: #d4836a;
-    color: #ffffff;
+    background-image: none;
+    background-color: @theme_selected_bg_color;
+    color: @theme_selected_fg_color;
     border-radius: 8px;
-}
-button.btn-primary:hover {
-    background-color: #dc9278;
+    border: none;
 }
 button.btn-danger {
+    background-image: none;
     background-color: #c0392b;
     color: #ffffff;
     border-radius: 8px;
+    border: none;
 }
 button.btn-danger:hover {
+    background-image: none;
     background-color: #d44637;
 }
 button.btn-success {
+    background-image: none;
     background-color: #27ae60;
     color: #ffffff;
     border-radius: 8px;
+    border: none;
 }
 button.btn-success:hover {
+    background-image: none;
     background-color: #2ecc71;
 }
 button.btn-warning {
+    background-image: none;
     background-color: #e67e22;
     color: #ffffff;
     border-radius: 8px;
+    border: none;
 }
 button.btn-warning:hover {
+    background-image: none;
     background-color: #f39c12;
 }
 button.btn-secondary {
-    background-color: #35312b;
-    color: #c4bdb5;
-    border: 1px solid #4a4640;
     border-radius: 8px;
-}
-button.btn-secondary:hover {
-    background-color: #3d3830;
-    color: #ede8e1;
 }
 button.btn-icon {
     padding: 2px;
     min-width: 20px;
     min-height: 20px;
+    background-image: none;
     background-color: transparent;
-    color: #7a746c;
     border: none;
     border-radius: 4px;
+    box-shadow: none;
+    opacity: 0.6;
 }
 button.btn-icon:hover {
-    background-color: #2a2720;
-    color: #ede8e1;
+    background-image: none;
+    opacity: 1;
 }
 button.btn-icon-run {
-    color: #7a746c;
+    opacity: 0.6;
 }
 button.btn-icon-run:hover {
     color: #27ae60;
+    opacity: 1;
 }
 button.btn-icon-run.running {
     color: #27ae60;
+    opacity: 1;
 }
 
 /* -- emoji picker -- */
@@ -339,20 +331,10 @@ button.emoji-btn {
     min-width: 44px;
     min-height: 44px;
     padding: 6px;
-    background-color: #252219;
-    border: 1px solid #35312b;
     border-radius: 8px;
-    color: #ede8e1;
-}
-button.emoji-btn:hover {
-    background-color: #35312b;
-    border-color: #4a4640;
 }
 
 /* -- dialog -- */
-dialog {
-    background-color: #1e1b18;
-}
 dialog .dialog-action-area {
     padding: 8px;
 }
@@ -363,63 +345,39 @@ dialog .dialog-action-area button {
 
 /* -- switches -- */
 switch {
-    background-color: #35312b;
     border-radius: 12px;
-    border: 1px solid #4a4640;
 }
 switch:checked {
-    background-color: #d4836a;
-    border-color: #d4836a;
+    background-color: @theme_selected_bg_color;
 }
 switch slider {
-    background-color: #ede8e1;
     border-radius: 10px;
 }
 
 /* -- empty state -- */
 .empty-state {
-    color: #4a4640;
+    opacity: 0.45;
     font-size: 13px;
 }
 
 /* -- scrollbar -- */
-scrollbar {
-    background-color: #1e1b18;
-}
 scrollbar slider {
-    background-color: #35312b;
     border-radius: 4px;
     min-width: 4px;
     min-height: 4px;
 }
-scrollbar slider:hover {
-    background-color: #4a4640;
-}
 
 /* -- notebook tabs -- */
-notebook header {
-    background-color: #252219;
-    border-bottom: 1px solid #35312b;
-}
 notebook header tabs tab {
-    background-color: #252219;
-    color: #7a746c;
     padding: 6px 16px;
     border: none;
 }
 notebook header tabs tab:checked {
-    background-color: #1e1b18;
-    color: #ede8e1;
-    border-bottom: 2px solid #d4836a;
-}
-notebook header tabs tab:hover:not(:checked) {
-    color: #c4bdb5;
+    border-bottom: 2px solid @theme_selected_bg_color;
 }
 
 /* -- log viewer -- */
 .log-view {
-    background-color: #151310;
-    color: #c4bdb5;
     font-family: 'Ubuntu Mono', 'Fira Code', 'Consolas', monospace;
     font-size: 12px;
     padding: 8px;
@@ -427,13 +385,10 @@ notebook header tabs tab:hover:not(:checked) {
 
 /* -- group tabs -- */
 #group-tabs {
-    background-color: #1e1b18;
-    border-bottom: 1px solid #35312b;
     min-height: 32px;
 }
 .group-tab {
     background-color: transparent;
-    color: #7a746c;
     border: none;
     border-radius: 0;
     padding: 6px 12px;
@@ -441,39 +396,67 @@ notebook header tabs tab:hover:not(:checked) {
     font-weight: 600;
     border-bottom: 2px solid transparent;
     min-width: 40px;
+    opacity: 0.6;
 }
 .group-tab:checked {
-    color: #ede8e1;
-    border-bottom: 2px solid #d4836a;
+    opacity: 1;
+    border-bottom: 2px solid @theme_selected_bg_color;
     background-color: transparent;
 }
 .group-tab:hover:not(:checked) {
-    color: #c4bdb5;
-    background-color: #252219;
+    opacity: 0.8;
 }
 
 /* -- group checkbox -- */
 checkbutton.group-check {
     font-size: 12px;
-    color: #ede8e1;
     padding: 3px 0;
 }
 
 /* -- group card -- */
 .group-card {
-    background-color: #252219;
     border-radius: 8px;
-    border: 1px solid #35312b;
-}
-.group-card:hover {
-    border-color: #4a4640;
 }
 .group-card-selected {
-    border-left: 3px solid #d4836a;
-    background-color: #2a2720;
+    background-color: @theme_base_color;
+    color: @theme_text_color;
+    border-left: 3px solid @theme_selected_bg_color;
 }
-.group-card-header {
-    border-bottom: 1px solid #2c2923;
+.group-card-selected *:not(.badge-error):not(.badge-running):not(.badge-port):not(.badge-pinned) {
+    color: @theme_text_color;
+}
+
+/* -- log search bar -- */
+.log-search-bar {
+    border-radius: 6px;
+    padding: 0;
+    background-color: @theme_bg_color;
+    border: 1px solid @borders;
+}
+.log-search-bar button {
+    border-radius: 0;
+    padding: 6px 8px;
+    min-width: 0;
+    border: none;
+    background-image: none;
+    background-color: @theme_bg_color;
+    box-shadow: none;
+}
+.log-search-entry-wrap {
+    border-radius: 6px 0 0 6px;
+    background-color: @theme_base_color;
+}
+.log-search-entry-wrap entry {
+    border-radius: 6px 0 0 6px;
+    border: none;
+    box-shadow: none;
+    background-color: @theme_base_color;
+    background-image: none;
+}
+.log-search-count {
+    font-size: 11px;
+    opacity: 0.6;
+    padding: 0 6px;
 }
 """
 
@@ -973,6 +956,54 @@ class GroupRow(Gtk.ListBoxRow):
         return s
 
 
+def _is_dark_theme():
+    """Detect if the current GTK theme is dark based on the window bg luminance."""
+    settings = Gtk.Settings.get_default()
+    if settings and settings.get_property("gtk-application-prefer-dark-theme"):
+        return True
+    style = Gtk.StyleContext()
+    path = Gtk.WidgetPath()
+    path.append_type(Gtk.Window)
+    style.set_path(path)
+    bg = style.get_background_color(Gtk.StateFlags.NORMAL)
+    luminance = 0.299 * bg.red + 0.587 * bg.green + 0.114 * bg.blue
+    return luminance < 0.5
+
+
+def _theme_log_colors():
+    """Return syntax highlight colors adapted to the current theme."""
+    dark = _is_dark_theme()
+    if dark:
+        return {
+            "json-key": "#e08a6f",
+            "json-string": "#2ecc71",
+            "json-number": "#f0a050",
+            "json-bool": "#b07ad8",
+            "json-null": "#95a5a6",
+            "json-brace": "#5dade2",
+            "search-match-bg": "#e0c040",
+            "search-match-fg": "#1a1a1a",
+            "search-current-bg": "#f5a623",
+            "search-current-fg": "#1a1a1a",
+            "fold-accent": "#e08a6f",
+            "fold-hint": "#95a5a6",
+        }
+    return {
+        "json-key": "#a0522d",
+        "json-string": "#1a7a40",
+        "json-number": "#c06000",
+        "json-bool": "#6a1b9a",
+        "json-null": "#607d8b",
+        "json-brace": "#1565c0",
+        "search-match-bg": "#fff176",
+        "search-match-fg": "#1a1a1a",
+        "search-current-bg": "#ffb300",
+        "search-current-fg": "#1a1a1a",
+        "fold-accent": "#a0522d",
+        "fold-hint": "#607d8b",
+    }
+
+
 # -- edit form ------------------------------------------------------------------
 
 class ScriptForm(Gtk.Box):
@@ -1308,6 +1339,12 @@ class ScriptForm(Gtk.Box):
         self.log_dismiss_btn = Gtk.Button(label="Dismiss Error")
         self.log_dismiss_btn.get_style_context().add_class("btn-secondary")
 
+        self.log_search_btn = Gtk.Button()
+        self.log_search_btn.set_image(Gtk.Image.new_from_icon_name("edit-find-symbolic", Gtk.IconSize.MENU))
+        self.log_search_btn.set_tooltip_text("Search (Ctrl+F)")
+        self.log_search_btn.get_style_context().add_class("btn-secondary")
+        self.log_search_btn.connect("clicked", lambda _: self._open_log_search())
+
         self.log_path_lbl = Gtk.Label(label="")
         self.log_path_lbl.get_style_context().add_class("form-hint")
         self.log_path_lbl.set_hexpand(True)
@@ -1317,7 +1354,8 @@ class ScriptForm(Gtk.Box):
         logs_toolbar.pack_start(self.log_refresh_btn, False, False, 0)
         logs_toolbar.pack_start(self.log_clear_btn, False, False, 0)
         logs_toolbar.pack_start(self.log_dismiss_btn, False, False, 0)
-        logs_toolbar.pack_end(self.log_path_lbl, True, True, 0)
+        logs_toolbar.pack_start(self.log_path_lbl, True, True, 0)
+        logs_toolbar.pack_end(self.log_search_btn, False, False, 0)
         self.logs_box.pack_start(logs_toolbar, False, False, 0)
 
         # Error banner
@@ -1352,14 +1390,17 @@ class ScriptForm(Gtk.Box):
         self.log_text_view.set_monospace(True)
         self.log_text_view.get_style_context().add_class("log-view")
 
-        # JSON syntax highlight tags
+        # JSON syntax highlight tags (theme-aware)
+        self._tc = _theme_log_colors()
         buf = self.log_text_view.get_buffer()
-        buf.create_tag("json-key", foreground="#d4836a", weight=Pango.Weight.BOLD)
-        buf.create_tag("json-string", foreground="#27ae60")
-        buf.create_tag("json-number", foreground="#e67e22")
-        buf.create_tag("json-bool", foreground="#8e44ad", weight=Pango.Weight.BOLD)
-        buf.create_tag("json-null", foreground="#7f8c8d", style=Pango.Style.ITALIC)
-        buf.create_tag("json-brace", foreground="#3498db")
+        buf.create_tag("json-key", foreground=self._tc["json-key"], weight=Pango.Weight.BOLD)
+        buf.create_tag("json-string", foreground=self._tc["json-string"])
+        buf.create_tag("json-number", foreground=self._tc["json-number"])
+        buf.create_tag("json-bool", foreground=self._tc["json-bool"], weight=Pango.Weight.BOLD)
+        buf.create_tag("json-null", foreground=self._tc["json-null"], style=Pango.Style.ITALIC)
+        buf.create_tag("json-brace", foreground=self._tc["json-brace"])
+        buf.create_tag("search-match", background=self._tc["search-match-bg"], foreground=self._tc["search-match-fg"])
+        buf.create_tag("search-current", background=self._tc["search-current-bg"], foreground=self._tc["search-current-fg"])
 
         self.log_scroll.add(self.log_text_view)
         # Track scroll position via vadjustment (catches scrollbar drag, keyboard, mouse wheel)
@@ -1368,7 +1409,66 @@ class ScriptForm(Gtk.Box):
         self.log_text_view.add_events(Gdk.EventMask.POINTER_MOTION_MASK)
         self.log_text_view.connect("button-press-event", self._on_log_click)
         self.log_text_view.connect("motion-notify-event", self._on_log_motion)
-        self.logs_box.pack_start(self.log_scroll, True, True, 0)
+
+        # ── Log search bar (floating below search button) ──
+        self._log_search_revealer = Gtk.Revealer()
+        self._log_search_revealer.set_transition_type(Gtk.RevealerTransitionType.SLIDE_DOWN)
+        self._log_search_revealer.set_transition_duration(150)
+        self._log_search_revealer.set_reveal_child(False)
+        self._log_search_revealer.set_halign(Gtk.Align.END)
+        self._log_search_revealer.set_valign(Gtk.Align.START)
+
+        search_bar_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+        search_bar_box.get_style_context().add_class("log-search-bar")
+        search_bar_box.set_margin_end(8)
+        search_bar_box.set_margin_top(4)
+
+        # Entry + count inside a wrapper to show count inside the input
+        entry_wrapper = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+        entry_wrapper.get_style_context().add_class("log-search-entry-wrap")
+        entry_wrapper.set_size_request(300, -1)
+
+        self._log_search_entry = Gtk.SearchEntry()
+        self._log_search_entry.set_placeholder_text("Search…")
+        self._log_search_entry.set_hexpand(True)
+        self._log_search_entry.get_style_context().add_class("log-search-input")
+
+        self._log_search_count = Gtk.Label(label="")
+        self._log_search_count.get_style_context().add_class("log-search-count")
+
+        entry_wrapper.pack_start(self._log_search_entry, True, True, 0)
+        entry_wrapper.pack_start(self._log_search_count, False, False, 0)
+
+        self._log_search_prev = Gtk.Button(label="▲")
+        self._log_search_prev.set_tooltip_text("Previous (Shift+Enter)")
+        self._log_search_next = Gtk.Button(label="▼")
+        self._log_search_next.set_tooltip_text("Next (Enter)")
+
+        self._log_search_close = Gtk.Button(label="✕")
+        self._log_search_close.set_tooltip_text("Close (Esc)")
+
+        search_bar_box.pack_start(entry_wrapper, False, False, 0)
+        search_bar_box.pack_start(self._log_search_prev, False, False, 0)
+        search_bar_box.pack_start(self._log_search_next, False, False, 0)
+        search_bar_box.pack_start(self._log_search_close, False, False, 0)
+
+        self._log_search_revealer.add(search_bar_box)
+
+        self._log_search_matches = []
+        self._log_search_idx = -1
+        self._log_search_timeout_id = None
+
+        self._log_search_entry.connect("search-changed", self._on_log_search_changed)
+        self._log_search_prev.connect("clicked", lambda _: self._log_search_navigate(-1))
+        self._log_search_next.connect("clicked", lambda _: self._log_search_navigate(1))
+        self._log_search_close.connect("clicked", lambda _: self._close_log_search())
+        self._log_search_entry.connect("key-press-event", self._on_log_search_key)
+
+        # Overlay: log_scroll as base, search bar floating on top-right
+        log_overlay = Gtk.Overlay()
+        log_overlay.add(self.log_scroll)
+        log_overlay.add_overlay(self._log_search_revealer)
+        self.logs_box.pack_start(log_overlay, True, True, 0)
 
         self.notebook.append_page(self.logs_box, Gtk.Label(label="Logs"))
 
@@ -1376,6 +1476,8 @@ class ScriptForm(Gtk.Box):
         self.log_refresh_btn.connect("clicked", lambda _: self._reload_log())
         self.log_clear_btn.connect("clicked", self._clear_log)
         self.log_dismiss_btn.connect("clicked", self._dismiss_log_error)
+        self.notebook.connect("switch-page", self._on_tab_switched)
+        self._log_pending = False
 
         # Auto-save on any field change
         self.name_entry.connect("changed", lambda _: self._auto_save())
@@ -1409,7 +1511,11 @@ class ScriptForm(Gtk.Box):
         self._user_scrolled_up = False
         self._last_log_clean = ""
         self._fold_states = {}
-        self._reload_log()
+        self.log_text_view.get_buffer().set_text("")
+        self._log_pending = True
+        if self.notebook.get_current_page() == 1:
+            self._reload_log()
+            self._log_pending = False
         self._update_error_banner()
         self._rebuild_group_checkboxes()
 
@@ -1442,6 +1548,11 @@ class ScriptForm(Gtk.Box):
             return
         self._save()
 
+    def _on_tab_switched(self, notebook, page, page_num):
+        if page_num == 1 and self._log_pending:
+            self._reload_log()
+            self._log_pending = False
+
     # ── log tab helpers ──
 
     def _get_log_path(self):
@@ -1459,13 +1570,26 @@ class ScriptForm(Gtk.Box):
         at_bottom = adj.get_value() >= adj.get_upper() - adj.get_page_size() - 20
         self._user_scrolled_up = not at_bottom
 
+    _LOG_MAX_BYTES = 512 * 1024  # 512 KB tail
+
     def _read_log_raw(self, lp):
-        """Read raw log text from file path."""
+        """Read raw log text from file path (tail only for large files)."""
         self.log_path_lbl.set_text(str(lp))
         try:
-            if lp.exists():
+            if not lp.exists():
+                return "(no logs yet)"
+            size = lp.stat().st_size
+            if size <= self._LOG_MAX_BYTES:
                 return lp.read_text(errors="replace")
-            return "(no logs yet)"
+            with open(lp, "rb") as f:
+                f.seek(size - self._LOG_MAX_BYTES)
+                data = f.read()
+            text = data.decode(errors="replace")
+            # skip first partial line
+            nl = text.find('\n')
+            if nl != -1:
+                text = text[nl + 1:]
+            return f"… (showing last {self._LOG_MAX_BYTES // 1024} KB of {size // 1024} KB)\n" + text
         except Exception as e:
             return f"Error reading log: {e}"
 
@@ -1536,6 +1660,7 @@ class ScriptForm(Gtk.Box):
 
         if is_append:
             self._append_tail_content(buf, raw, old_clean, clean)
+            self._reapply_log_search()
             return
 
         # Full rebuild needed
@@ -1546,6 +1671,7 @@ class ScriptForm(Gtk.Box):
             saved_line = top_iter[1].get_line() if isinstance(top_iter, tuple) else top_iter.get_line()
         self._log_scroll_internal = True
         self._build_collapsible_buffer(buf, raw)
+        self._reapply_log_search()
         if saved_line == -1:
             GLib.idle_add(self._scroll_to_end)
         else:
@@ -1704,11 +1830,11 @@ class ScriptForm(Gtk.Box):
 
     def _create_fold_tags(self, buf, fold_id, collapsed):
         """Create the four visibility tags for a JSON fold."""
-        buf.create_tag(f"jte-{fold_id}", foreground="#d4836a", weight=Pango.Weight.BOLD,
+        buf.create_tag(f"jte-{fold_id}", foreground=self._tc["fold-accent"], weight=Pango.Weight.BOLD,
                        invisible=collapsed)
-        buf.create_tag(f"jtc-{fold_id}", foreground="#d4836a", weight=Pango.Weight.BOLD,
+        buf.create_tag(f"jtc-{fold_id}", foreground=self._tc["fold-accent"], weight=Pango.Weight.BOLD,
                        invisible=not collapsed)
-        buf.create_tag(f"js-{fold_id}", foreground="#7a746c", style=Pango.Style.ITALIC,
+        buf.create_tag(f"js-{fold_id}", foreground=self._tc["fold-hint"], style=Pango.Style.ITALIC,
                        invisible=not collapsed)
         buf.create_tag(f"jc-{fold_id}", invisible=collapsed)
 
@@ -1888,6 +2014,98 @@ class ScriptForm(Gtk.Box):
         if self._script:
             clear_error_state(self._script.get("id", ""))
             self._update_error_banner()
+
+    # ── log search (gedit-style) ──
+
+    def _open_log_search(self):
+        self._log_search_revealer.set_reveal_child(True)
+        self._log_search_entry.grab_focus()
+        sel = self.log_text_view.get_buffer().get_selection_bounds()
+        if sel:
+            self._log_search_entry.set_text(
+                sel[0].get_text(sel[1]))
+
+    def _close_log_search(self):
+        self._log_search_revealer.set_reveal_child(False)
+        buf = self.log_text_view.get_buffer()
+        buf.remove_tag_by_name("search-match", buf.get_start_iter(), buf.get_end_iter())
+        buf.remove_tag_by_name("search-current", buf.get_start_iter(), buf.get_end_iter())
+        self._log_search_matches.clear()
+        self._log_search_idx = -1
+        self._log_search_count.set_text("")
+        self.log_text_view.grab_focus()
+
+    def _on_log_search_key(self, widget, event):
+        key = event.keyval
+        if key == Gdk.KEY_Escape:
+            self._close_log_search()
+            return True
+        if key in (Gdk.KEY_Return, Gdk.KEY_KP_Enter):
+            if event.state & Gdk.ModifierType.SHIFT_MASK:
+                self._log_search_navigate(-1)
+            else:
+                self._log_search_navigate(1)
+            return True
+        return False
+
+    def _on_log_search_changed(self, entry):
+        if self._log_search_timeout_id:
+            GLib.source_remove(self._log_search_timeout_id)
+        self._log_search_timeout_id = GLib.timeout_add(150, self._do_log_search)
+
+    def _do_log_search(self):
+        self._log_search_timeout_id = None
+        buf = self.log_text_view.get_buffer()
+        buf.remove_tag_by_name("search-match", buf.get_start_iter(), buf.get_end_iter())
+        buf.remove_tag_by_name("search-current", buf.get_start_iter(), buf.get_end_iter())
+        self._log_search_matches.clear()
+        self._log_search_idx = -1
+
+        query = self._log_search_entry.get_text().strip()
+        if not query:
+            self._log_search_count.set_text("")
+            return False
+
+        start = buf.get_start_iter()
+        while True:
+            result = start.forward_search(query, Gtk.TextSearchFlags.CASE_INSENSITIVE, None)
+            if not result:
+                break
+            match_start, match_end = result
+            buf.apply_tag_by_name("search-match", match_start, match_end)
+            self._log_search_matches.append((match_start.get_offset(), match_end.get_offset()))
+            start = match_end
+
+        count = len(self._log_search_matches)
+        if count == 0:
+            self._log_search_count.set_text("0 results")
+        else:
+            self._log_search_idx = 0
+            self._highlight_current_match()
+        return False
+
+    def _highlight_current_match(self):
+        buf = self.log_text_view.get_buffer()
+        buf.remove_tag_by_name("search-current", buf.get_start_iter(), buf.get_end_iter())
+        if not self._log_search_matches or self._log_search_idx < 0:
+            return
+        off_start, off_end = self._log_search_matches[self._log_search_idx]
+        it_start = buf.get_iter_at_offset(off_start)
+        it_end = buf.get_iter_at_offset(off_end)
+        buf.apply_tag_by_name("search-current", it_start, it_end)
+        self._log_search_count.set_text(
+            f"{self._log_search_idx + 1}/{len(self._log_search_matches)}")
+        self.log_text_view.scroll_to_iter(it_start, 0.1, True, 0.0, 0.5)
+
+    def _log_search_navigate(self, direction):
+        if not self._log_search_matches:
+            return
+        self._log_search_idx = (self._log_search_idx + direction) % len(self._log_search_matches)
+        self._highlight_current_match()
+
+    def _reapply_log_search(self):
+        if self._log_search_revealer.get_reveal_child() and self._log_search_entry.get_text().strip():
+            self._do_log_search()
 
     def _save(self, _widget=None):
         if not self._script:
@@ -2260,6 +2478,10 @@ class ManagerWindow(Gtk.ApplicationWindow):
             if logo_path.exists():
                 self.set_icon_from_file(str(logo_path))
 
+        # Set ANSI colors based on theme
+        global ANSI_COLORS
+        ANSI_COLORS = _ANSI_COLORS_LIGHT if not _is_dark_theme() else _ANSI_COLORS_DARK
+
         # CSS
         provider = Gtk.CssProvider()
         provider.load_from_data(CSS.encode("utf-8"))
@@ -2576,13 +2798,18 @@ class ManagerWindow(Gtk.ApplicationWindow):
 
         hpaned.pack2(self.right_stack, True, False)
 
-        self._load_list()
         ScriptRow._on_run = self._run_script
         ScriptRow._on_stop = self._stop_single_script
         ScriptRow._on_restart = self._restart_script
         ScriptRow._on_select_script_settings = self._open_script_settings
         ScriptRow._on_select_script_logs = self._open_script_logs
         ScriptRow._on_open_terminal = self._open_terminal
+        self._load_list()
+        # Ctrl+F accelerator (works globally, even when focus is on an entry)
+        accel = Gtk.AccelGroup()
+        accel.connect(Gdk.KEY_f, Gdk.ModifierType.CONTROL_MASK, 0,
+                      lambda *_: self._toggle_log_search() or True)
+        self.add_accel_group(accel)
         self.show_all()
         # Select first script if available
         first = self.listbox.get_row_at_index(0)
@@ -2596,11 +2823,19 @@ class ManagerWindow(Gtk.ApplicationWindow):
         self._last_running_state = get_running_ids()
         GLib.timeout_add_seconds(2, self._refresh_logs_tab)
 
+    def _toggle_log_search(self):
+        if self.right_stack.get_visible_child_name() == "script":
+            self.form.notebook.set_current_page(1)  # Logs tab
+            self.form._open_log_search()
+
     def _refresh_logs_tab(self) -> bool:
         # Check if error/running states changed — only then rebuild sidebar
         new_errors = get_error_states()
         new_running = get_running_ids()
-        self.form._reload_log()
+        if self.form.notebook.get_current_page() == 1:
+            self.form._reload_log()
+        else:
+            self.form._log_pending = True
         self.form._update_error_banner(errors=new_errors)
         if new_errors != self._last_error_state or new_running != self._last_running_state:
             self._last_error_state = new_errors
