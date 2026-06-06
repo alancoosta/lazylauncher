@@ -689,6 +689,7 @@ class GroupRow(Gtk.ListBoxRow):
     _on_run_group = None
     _on_stop_group = None
     _on_restart_group = None
+    _on_select_group_settings = None
     _on_run_script = None
     _on_stop_script = None
     _on_restart_script = None
@@ -908,6 +909,14 @@ class GroupRow(Gtk.ListBoxRow):
         if GroupRow._on_stop_group:
             stop_btn.connect("clicked", lambda _, g=self.group: GroupRow._on_stop_group(g))
 
+        settings_btn = Gtk.Button()
+        settings_btn.set_image(Gtk.Image.new_from_icon_name("emblem-system-symbolic", Gtk.IconSize.MENU))
+        settings_btn.get_style_context().add_class("btn-icon")
+        settings_btn.set_tooltip_text("Group Settings")
+        if GroupRow._on_select_group_settings:
+            settings_btn.connect("clicked", lambda _, g=self.group: GroupRow._on_select_group_settings(g))
+
+        self._action_box.pack_start(settings_btn, False, False, 0)
         self._action_box.pack_start(run_btn, False, False, 0)
         self._action_box.pack_start(restart_btn, False, False, 0)
         self._action_box.pack_start(stop_btn, False, False, 0)
@@ -2935,6 +2944,7 @@ class ManagerWindow(Gtk.ApplicationWindow):
         GroupRow._on_run_group = self._run_group
         GroupRow._on_stop_group = self._stop_group
         GroupRow._on_restart_group = self._restart_group
+        GroupRow._on_select_group_settings = self._select_group
         GroupRow._on_run_script = self._run_script
         GroupRow._on_stop_script = self._stop_single_script
         GroupRow._on_restart_script = self._restart_script
@@ -2983,6 +2993,7 @@ class ManagerWindow(Gtk.ApplicationWindow):
         GroupRow._on_run_group = self._run_group
         GroupRow._on_stop_group = self._stop_group
         GroupRow._on_restart_group = self._restart_group
+        GroupRow._on_select_group_settings = self._select_group
         GroupRow._on_run_script = self._run_script
         GroupRow._on_stop_script = self._stop_single_script
         GroupRow._on_restart_script = self._restart_script
@@ -3001,8 +3012,9 @@ class ManagerWindow(Gtk.ApplicationWindow):
                 break
 
     def _group_row_selected(self, _listbox, row):
-        if row and isinstance(row, GroupRow) and row.group.get("id") != self._selected_group_id:
-            self._select_group(row.group)
+        if row and isinstance(row, GroupRow):
+            if row.group.get("id") != self._selected_group_id or self.right_stack.get_visible_child_name() != "group":
+                self._select_group(row.group)
 
     def _new_group_and_select(self):
         cfg = load_config()
