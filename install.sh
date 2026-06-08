@@ -116,7 +116,7 @@ echo "==> Creating launcher command..."
 
 cat > "$BIN_DIR/lazylauncher" << 'EOF'
 #!/usr/bin/env bash
-exec python3 "$HOME/.local/share/lazylauncher/lazylauncher.py" "$@"
+exec -a lazylauncher python3 "$HOME/.local/share/lazylauncher/lazylauncher.py" "$@"
 EOF
 chmod +x "$BIN_DIR/lazylauncher"
 
@@ -184,13 +184,13 @@ fi
 if [ "$IS_UPDATE" = true ]; then
     echo "==> Restarting running instances..."
     # Kill manager if running (it will be restarted below)
-    MANAGER_PID=$(pgrep -f "lazylauncher.py manage" 2>/dev/null || true)
+    MANAGER_PID=$(pgrep -xf "lazylauncher.*manage" 2>/dev/null || true)
     if [ -n "$MANAGER_PID" ]; then
         kill $MANAGER_PID 2>/dev/null || true
         sleep 0.3
     fi
     # Restart tray daemon
-    TRAY_PID=$(pgrep -f "lazylauncher.py$" 2>/dev/null || true)
+    TRAY_PID=$(pgrep -x lazylauncher 2>/dev/null || true)
     if [ -n "$TRAY_PID" ]; then
         kill $TRAY_PID 2>/dev/null || true
         sleep 0.3
