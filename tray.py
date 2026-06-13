@@ -23,6 +23,7 @@ from common import (
     get_error_states, get_running_ids,
     _get_pid_start_time, _is_pid_alive, _mark_stopped,
     find_script_pid, rotate_log, log_path,
+    normalize_env_vars,
 )
 
 import gi
@@ -60,16 +61,16 @@ def _kill_safe(fn, *args):
         pass
 
 
-def _parse_env_vars(raw_env: str) -> dict:
-    """Parse env vars string, dropping dangerous keys."""
+def _parse_env_vars(raw_env) -> dict:
+    """Build the runtime environment, dropping dangerous keys.
+
+    ``raw_env`` may be the new list-of-dicts format or a legacy
+    space-separated ``KEY=VALUE`` string; both are normalized.
+    """
     env = os.environ.copy()
-    if not raw_env:
-        return env
-    for pair in raw_env.split():
-        if "=" in pair:
-            key, _, value = pair.partition("=")
-            if key.upper() not in _BLOCKED_ENV_KEYS:
-                env[key] = value
+    for item in normalize_env_vars(raw_env):
+        if item["key"].upper() not in _BLOCKED_ENV_KEYS:
+            env[item["key"]] = item["value"]
     return env
 
 
@@ -232,7 +233,7 @@ def run_script(script: dict):
             return
 
     cwd = str(Path(cwd).expanduser())
-    env = _parse_env_vars(script.get("env_vars", "").strip())
+    env = _parse_env_vars(script.get("env_vars", ""))
 
     if silent:
         _run_silent(cmd, cwd, env, script_id, label)
@@ -522,22 +523,9 @@ def _open_log_file(path: str):
                 continue
 
 
-_SAFE_ICON_EXTENSIONS = {".png", ".svg", ".ico", ".jpg", ".jpeg", ".gif"}
-_UNSAFE_ICON_PREFIXES = ("/etc/", "/proc/", "/sys/", "/dev/", "/root/")
-
-
 def resolve_icon(script: dict) -> str:
-    """Return a valid icon path/name for a script."""
-    custom = script.get("icon", "")
-    if custom:
-        p = Path(custom).expanduser()
-        if p.exists():
-            resolved = str(p.resolve())
-            if (p.suffix.lower() in _SAFE_ICON_EXTENSIONS
-                    and not resolved.startswith(_UNSAFE_ICON_PREFIXES)):
-                return str(p)
-        if not p.is_absolute():
-            return custom
+    """Return the icon to use for a script. Per-script custom icons were
+    removed, so this is always the default app icon."""
     return DEFAULT_ICON
 
 

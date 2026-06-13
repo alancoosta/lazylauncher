@@ -15,22 +15,22 @@ import subprocess
 import sys
 import time
 import uuid
-from PIL import Image, ImageDraw, ImageFont
 from pathlib import Path
 
 from common import (
-    CONFIG_DIR, CONFIG_FILE, ICON_DIR, LOG_DIR,
+    CONFIG_DIR, CONFIG_FILE, LOG_DIR,
     RUN_STATE_FILE, ERROR_STATE_FILE,
     _safe_write, load_config, save_config,
     get_error_states, clear_error_state,
     get_running_ids, find_script_pid,
     _get_pid_start_time, _is_pid_alive, _mark_stopped,
     log_path, rotate_log,
+    normalize_env_vars,
 )
 
 import gi
 gi.require_version("Gtk", "3.0")
-from gi.repository import Gtk, Gdk, GdkPixbuf, Pango, GLib
+from gi.repository import Gtk, Gdk, Pango, GLib, GObject
 
 # ANSI color code → hex color (adapted for dark background)
 _ANSI_COLORS_DARK = {
@@ -324,16 +324,6 @@ button.btn-icon-run.running {
     opacity: 1;
 }
 
-/* -- emoji picker -- */
-button.emoji-btn {
-    font-family: "Noto Color Emoji", "Segoe UI Emoji", sans-serif;
-    font-size: 24px;
-    min-width: 44px;
-    min-height: 44px;
-    padding: 6px;
-    border-radius: 8px;
-}
-
 /* -- dialog -- */
 dialog .dialog-action-area {
     padding: 8px;
@@ -470,11 +460,10 @@ def new_script() -> dict:
         "name":        "New Script",
         "command":     "",
         "working_dir": str(Path.home()),
-        "icon":        "",
         "pinned_icon": False,
         "enabled":     True,
         "description": "",
-        "env_vars":    "",
+        "env_vars":    [],
         "port":        "",
         "confirm":     False,
         "silent":      True,
@@ -488,46 +477,6 @@ def new_group(name: str) -> dict:
         "name":        name,
         "description": "",
     }
-
-
-EMOJIS = [
-    "🚀", "⚡", "🔥", "✅", "❌", "⚠️", "🔧", "📦", "🏗️", "🎯",
-    "🌐", "💻", "🖥️", "📱", "⌨️", "🐳", "🦀", "🐍", "☕", "🟢",
-    "🔴", "🟡", "🔵", "🟣", "⚙️", "🔒", "🔑", "📂", "📁", "💾",
-    "⬆️", "⬇️", "➡️", "⬅️", "↩️", "🔄", "▶️", "⏸️", "⏹️", "🛑",
-    "🌟", "⭐", "🌙", "☀️", "🌈", "🍀", "🌍", "🌊", "❄️", "💎",
-    "🛠️", "📡", "🔋", "🔌", "📊", "📈", "📉", "🗓️", "🔔", "🔕",
-    "☁️", "☂️", "🎨", "🎵", "🎮", "🧪", "🧰", "💡", "🔭", "🤖",
-]
-
-
-def _render_emoji_to_png(emoji: str) -> str:
-    """Render an emoji to a PNG file in ICON_DIR and return its path."""
-    ICON_DIR.mkdir(parents=True, exist_ok=True)
-    hex_name = "-".join(f"{ord(c):x}" for c in emoji)
-    path = ICON_DIR / f"emoji-{hex_name}.png"
-    if path.exists():
-        return str(path)
-
-    big = 128
-    img = Image.new("RGBA", (big, big), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(img)
-    try:
-        font = ImageFont.truetype(
-            "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf", 109
-        )
-    except OSError:
-        font = ImageFont.load_default()
-
-    bbox = draw.textbbox((0, 0), emoji, font=font)
-    w, h = bbox[2] - bbox[0], bbox[3] - bbox[1]
-    x = (big - w) / 2 - bbox[0]
-    y = (big - h) / 2 - bbox[1]
-    draw.text((x, y), emoji, font=font, embedded_color=True)
-
-    img = img.resize((48, 48), Image.LANCZOS)
-    img.save(str(path))
-    return str(path)
 
 
 # -- script row widget ----------------------------------------------------------
@@ -1015,6 +964,100 @@ def _theme_log_colors():
 
 # -- edit form ------------------------------------------------------------------
 
+class EnvVarsTable(Gtk.Box):
+    """Key/value table for environment variables.
+
+    Reads / writes the ``env_vars`` field as a list of ``{"key", "value"}``
+    dicts (``get_env_vars`` / ``set_env_vars``); ``set_env_vars`` also accepts
+    the legacy space-separated string. Emits ``changed`` on any edit.
+    """
+
+    __gsignals__ = {
+        "changed": (GObject.SignalFlags.RUN_FIRST, None, ()),
+    }
+
+    def __init__(self):
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        self._rows = []          # list of (row_box, key_entry, val_entry)
+        self._suppress = False   # silence ``changed`` while loading
+
+        self._rows_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        self.pack_start(self._rows_box, False, False, 0)
+
+        add_btn = Gtk.Button(label="+ Add variable")
+        add_btn.get_style_context().add_class("btn-secondary")
+        add_btn.set_halign(Gtk.Align.START)
+        add_btn.connect("clicked", lambda _: self._add_row(focus=True))
+        self.pack_start(add_btn, False, False, 0)
+
+    def _add_row(self, key="", value="", focus=False):
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+
+        key_entry = Gtk.Entry()
+        key_entry.get_style_context().add_class("form-entry")
+        key_entry.set_placeholder_text("KEY")
+        key_entry.set_width_chars(28)
+        key_entry.set_text(key)
+
+        val_entry = Gtk.Entry()
+        val_entry.get_style_context().add_class("form-entry")
+        val_entry.set_placeholder_text("value")
+        val_entry.set_hexpand(True)
+        val_entry.set_text(value)
+
+        remove_btn = Gtk.Button(label="✕")
+        remove_btn.get_style_context().add_class("btn-icon")
+        remove_btn.set_valign(Gtk.Align.CENTER)
+
+        entry = (row, key_entry, val_entry)
+        remove_btn.connect("clicked", lambda _: self._remove_row(entry))
+        key_entry.connect("changed", lambda _: self._emit_changed())
+        val_entry.connect("changed", lambda _: self._emit_changed())
+
+        row.pack_start(key_entry, False, False, 0)
+        row.pack_start(val_entry, True, True, 0)
+        row.pack_start(remove_btn, False, False, 0)
+        self._rows_box.pack_start(row, False, False, 0)
+        self._rows.append(entry)
+        row.show_all()
+
+        if focus:
+            key_entry.grab_focus()
+        self._emit_changed()
+
+    def _remove_row(self, entry):
+        if entry not in self._rows:
+            return
+        row = entry[0]
+        self._rows_box.remove(row)
+        self._rows.remove(entry)
+        self._emit_changed()
+
+    def _emit_changed(self):
+        if not self._suppress:
+            self.emit("changed")
+
+    def get_env_vars(self):
+        """Return the table as a list of ``{"key", "value"}`` dicts, skipping
+        rows with an empty key."""
+        result = []
+        for _, key_entry, val_entry in self._rows:
+            key = key_entry.get_text().strip()
+            if key:
+                result.append({"key": key, "value": val_entry.get_text()})
+        return result
+
+    def set_env_vars(self, raw):
+        """Populate rows from a list of dicts or a legacy KEY=VALUE string."""
+        self._suppress = True
+        for row, _, _ in self._rows:
+            self._rows_box.remove(row)
+        self._rows.clear()
+        for item in normalize_env_vars(raw):
+            self._add_row(item["key"], item["value"])
+        self._suppress = False
+
+
 class ScriptForm(Gtk.Box):
     """Right-hand panel - shows when a script is selected."""
 
@@ -1186,25 +1229,6 @@ class ScriptForm(Gtk.Box):
         spacer = Gtk.Box(); spacer.set_size_request(-1, 10)
         inner.pack_start(spacer, False, False, 0)
 
-        # -- Appearance --
-        section("APPEARANCE")
-
-        icon_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        self.icon_entry = Gtk.Entry()
-        self.icon_entry.get_style_context().add_class("form-entry")
-        self.icon_entry.set_hexpand(True)
-        self.icon_entry.set_placeholder_text("utilities-terminal  or  /path/to/icon.png")
-        emoji_btn = Gtk.Button(label="Emoji")
-        emoji_btn.get_style_context().add_class("btn-secondary")
-        emoji_btn.connect("clicked", self._pick_emoji)
-        icon_btn = Gtk.Button(label="Browse…")
-        icon_btn.get_style_context().add_class("btn-secondary")
-        icon_btn.connect("clicked", self._browse_icon)
-        icon_box.pack_start(self.icon_entry, True, True, 0)
-        icon_box.pack_start(emoji_btn, False, False, 0)
-        icon_box.pack_start(icon_btn, False, False, 0)
-        field("ICON", icon_box, hint="Named system icon, emoji, or path to .png/.svg file")
-
         # -- Options --
         section("OPTIONS")
 
@@ -1249,31 +1273,10 @@ class ScriptForm(Gtk.Box):
 
         inner.pack_start(options_grid, False, False, 0)
 
-        # -- Environment --
+        # -- Port --
         spacer = Gtk.Box(); spacer.set_size_request(-1, 12)
         inner.pack_start(spacer, False, False, 0)
-        section("ENVIRONMENT")
 
-        env_port_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
-
-        env_vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
-        env_header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        env_lbl = Gtk.Label(label="ENV VARS")
-        env_lbl.set_halign(Gtk.Align.START)
-        env_lbl.get_style_context().add_class("form-label")
-        env_hint = Gtk.Label(label="Space-separated KEY=VALUE pairs")
-        env_hint.set_halign(Gtk.Align.START)
-        env_hint.get_style_context().add_class("form-hint")
-        env_header.pack_start(env_lbl, False, False, 0)
-        env_header.pack_start(env_hint, False, False, 0)
-        self.env_entry = Gtk.Entry()
-        self.env_entry.get_style_context().add_class("form-entry")
-        self.env_entry.set_hexpand(True)
-        self.env_entry.set_placeholder_text("NODE_ENV=production API_KEY=abc123")
-        env_vbox.pack_start(env_header, False, False, 0)
-        env_vbox.pack_start(self.env_entry, False, False, 0)
-
-        port_vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         port_header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         port_lbl = Gtk.Label(label="PORT")
         port_lbl.set_halign(Gtk.Align.START)
@@ -1287,12 +1290,10 @@ class ScriptForm(Gtk.Box):
         self.port_entry.get_style_context().add_class("form-entry")
         self.port_entry.set_placeholder_text("3000")
         self.port_entry.set_width_chars(8)
-        port_vbox.pack_start(port_header, False, False, 0)
-        port_vbox.pack_start(self.port_entry, False, False, 0)
-
-        env_port_box.pack_start(env_vbox, True, True, 0)
-        env_port_box.pack_start(port_vbox, False, False, 0)
-        inner.pack_start(env_port_box, False, False, 0)
+        port_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+        port_box.pack_start(self.port_entry, False, False, 0)
+        inner.pack_start(port_header, False, False, 0)
+        inner.pack_start(port_box, False, False, 0)
 
         # -- Groups --
         spacer = Gtk.Box(); spacer.set_size_request(-1, 12)
@@ -1481,6 +1482,45 @@ class ScriptForm(Gtk.Box):
 
         self.notebook.append_page(self.logs_box, Gtk.Label(label="Logs"))
 
+        # ── Envs tab ──
+        envs_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+
+        env_scroll = Gtk.ScrolledWindow()
+        env_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        env_scroll.set_hexpand(True)
+        env_scroll.set_vexpand(True)
+
+        env_inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        env_inner.set_margin_start(20)
+        env_inner.set_margin_end(20)
+        env_inner.set_margin_top(16)
+        env_inner.set_margin_bottom(20)
+
+        env_section = Gtk.Label(label="ENVIRONMENT")
+        env_section.set_halign(Gtk.Align.START)
+        env_section.get_style_context().add_class("section-header")
+        env_inner.pack_start(env_section, False, False, 0)
+
+        env_header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        env_lbl = Gtk.Label(label="ENV VARS")
+        env_lbl.set_halign(Gtk.Align.START)
+        env_lbl.get_style_context().add_class("form-label")
+        env_hint = Gtk.Label(label="One KEY / value pair per row")
+        env_hint.set_halign(Gtk.Align.START)
+        env_hint.get_style_context().add_class("form-hint")
+        env_header.pack_start(env_lbl, False, False, 0)
+        env_header.pack_start(env_hint, False, False, 0)
+        self.env_entry = EnvVarsTable()
+        self.env_entry.set_hexpand(True)
+        env_inner.pack_start(env_header, False, False, 0)
+        env_spacer = Gtk.Box(); env_spacer.set_size_request(-1, 8)
+        env_inner.pack_start(env_spacer, False, False, 0)
+        env_inner.pack_start(self.env_entry, False, False, 0)
+
+        env_scroll.add(env_inner)
+        envs_box.pack_start(env_scroll, True, True, 0)
+        self.notebook.append_page(envs_box, Gtk.Label(label="Envs"))
+
         # Log button connections
         self.log_refresh_btn.connect("clicked", lambda _: self._reload_log())
         self.log_clear_btn.connect("clicked", self._clear_log)
@@ -1493,7 +1533,6 @@ class ScriptForm(Gtk.Box):
         self.desc_entry.connect("changed", lambda _: self._auto_save())
         self.cmd_entry.connect("changed", lambda _: self._auto_save())
         self.wd_entry.connect("changed", lambda _: self._auto_save())
-        self.icon_entry.connect("changed", lambda _: self._auto_save())
         self.env_entry.connect("changed", lambda _: self._auto_save())
         self.port_entry.connect("changed", lambda _: self._auto_save())
         for sw in (self.pin_switch, self.enabled_switch,
@@ -1507,10 +1546,9 @@ class ScriptForm(Gtk.Box):
         self.desc_entry.set_text(script.get("description", ""))
         self.cmd_entry.set_text(script.get("command", ""))
         self.wd_entry.set_text(script.get("working_dir", str(Path.home())))
-        self.icon_entry.set_text(script.get("icon", ""))
         self.pin_switch.set_active(script.get("pinned_icon", False))
         self.enabled_switch.set_active(script.get("enabled", True))
-        self.env_entry.set_text(script.get("env_vars", ""))
+        self.env_entry.set_env_vars(script.get("env_vars", ""))
         self.port_entry.set_text(script.get("port", ""))
         self.confirm_switch.set_active(script.get("confirm", False))
         self.silent_switch.set_active(script.get("silent", False))
@@ -2123,14 +2161,14 @@ class ScriptForm(Gtk.Box):
         self._script["description"] = self.desc_entry.get_text().strip()
         self._script["command"]     = self.cmd_entry.get_text().strip()
         self._script["working_dir"] = self.wd_entry.get_text().strip() or str(Path.home())
-        self._script["icon"]        = self.icon_entry.get_text().strip()
         self._script["pinned_icon"] = self.pin_switch.get_active()
         self._script["enabled"]     = self.enabled_switch.get_active()
-        self._script["env_vars"]    = self.env_entry.get_text().strip()
+        self._script["env_vars"]    = self.env_entry.get_env_vars()
         self._script["port"]        = self.port_entry.get_text().strip()
         self._script["confirm"]     = self.confirm_switch.get_active()
         self._script["silent"]      = self.silent_switch.get_active()
         self._script["groups"]      = [gid for gid, cb in self._group_checkboxes.items() if cb.get_active()]
+        self._script.pop("icon", None)  # custom-icon feature removed; drop stale data
         self._on_save(self._script)
 
     def _run_current(self, _widget=None):
@@ -2145,7 +2183,7 @@ class ScriptForm(Gtk.Box):
             "name":        name,
             "command":     cmd,
             "working_dir": cwd,
-            "env_vars":    self.env_entry.get_text().strip(),
+            "env_vars":    self.env_entry.get_env_vars(),
             "confirm":     self.confirm_switch.get_active(),
             "silent":      self.silent_switch.get_active(),
         }
@@ -2170,78 +2208,6 @@ class ScriptForm(Gtk.Box):
                 self.name_entry.set_text(Path(chosen).name)
             self.wd_entry.set_text(chosen)
         dialog.destroy()
-
-    def _browse_icon(self, _widget):
-        dialog = Gtk.FileChooserDialog(
-            title="Select Icon File",
-            parent=self.get_toplevel(),
-            action=Gtk.FileChooserAction.OPEN,
-        )
-        dialog.add_buttons(Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL,
-                           Gtk.STOCK_OPEN,   Gtk.ResponseType.OK)
-        # Open at home directory
-        dialog.set_current_folder(str(Path.home()))
-        f = Gtk.FileFilter()
-        f.set_name("Images (PNG, SVG, ICO)")
-        f.add_pattern("*.png"); f.add_pattern("*.svg"); f.add_pattern("*.ico")
-        dialog.add_filter(f)
-        if dialog.run() == Gtk.ResponseType.OK:
-            self.icon_entry.set_text(dialog.get_filename())
-        dialog.destroy()
-
-    def _pick_emoji(self, _widget):
-        win = self.get_toplevel()
-        parent = win if isinstance(win, Gtk.Window) else None
-        dialog = Gtk.Dialog(
-            title="Pick an Emoji",
-            transient_for=parent,
-            modal=True,
-        )
-        dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
-        dialog.set_default_size(420, 380)
-        dialog.set_keep_above(True)
-        dialog.set_position(Gtk.WindowPosition.CENTER_ON_PARENT)
-
-        content = dialog.get_content_area()
-        content.set_spacing(0)
-
-        flow = Gtk.FlowBox()
-        flow.set_max_children_per_line(8)
-        flow.set_min_children_per_line(8)
-        flow.set_selection_mode(Gtk.SelectionMode.NONE)
-        flow.set_homogeneous(True)
-        flow.set_row_spacing(2)
-        flow.set_column_spacing(2)
-        flow.set_margin_start(8)
-        flow.set_margin_end(8)
-        flow.set_margin_top(8)
-        flow.set_margin_bottom(8)
-
-        for emoji in EMOJIS:
-            png_path = _render_emoji_to_png(emoji)
-            pixbuf = GdkPixbuf.Pixbuf.new_from_file_at_size(png_path, 32, 32)
-            img = Gtk.Image.new_from_pixbuf(pixbuf)
-            evbox = Gtk.EventBox()
-            evbox.add(img)
-            evbox.set_tooltip_text(emoji)
-            evbox.connect("button-press-event", lambda _, _ev, e=emoji: self._select_emoji(e, dialog))
-            flow.add(evbox)
-
-        scroll = Gtk.ScrolledWindow()
-        scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-        scroll.set_vexpand(True)
-        scroll.set_hexpand(True)
-        scroll.add(flow)
-
-        content.pack_start(scroll, True, True, 0)
-        dialog.show_all()
-        dialog.run()
-        dialog.destroy()
-
-    def _select_emoji(self, emoji, dialog):
-        path = _render_emoji_to_png(emoji)
-        self.icon_entry.set_text(path)
-        dialog.response(Gtk.ResponseType.OK)
 
 
 # -- group form -----------------------------------------------------------------

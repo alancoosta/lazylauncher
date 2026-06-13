@@ -31,6 +31,33 @@ def _safe_write(path: Path, data):
     os.chmod(str(path), 0o600)
 
 
+def normalize_env_vars(raw) -> list:
+    """Return env vars as a list of ``{"key": str, "value": str}`` dicts.
+
+    Accepts both the current list-of-dicts format and the legacy
+    space-separated ``KEY=VALUE`` string (whitespace-split; tokens without
+    ``=`` are dropped, mirroring the old runtime parser). Entries with an
+    empty key are skipped. Keys are stripped; values are preserved as-is so
+    they may contain spaces.
+    """
+    result = []
+    if isinstance(raw, list):
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            key = str(item.get("key", "")).strip()
+            if key:
+                result.append({"key": key, "value": str(item.get("value", ""))})
+    elif isinstance(raw, str):
+        for token in raw.split():
+            if "=" in token:
+                key, _, value = token.partition("=")
+                key = key.strip()
+                if key:
+                    result.append({"key": key, "value": value})
+    return result
+
+
 def load_config() -> dict:
     if CONFIG_FILE.exists():
         try:
