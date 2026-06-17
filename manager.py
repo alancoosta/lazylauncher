@@ -3,7 +3,7 @@
 """
 LazyLauncher - Manager UI
 A GTK3 window to add, edit, delete and reorder scripts.
-Writes to ~/.config/lazylauncher/config.json.
+Writes to ~/.config/lazylauncher/.lazylauncher-config.json.
 The tray daemon hot-reloads that file automatically.
 """
 
@@ -323,6 +323,13 @@ button.btn-icon-run.running {
     color: #27ae60;
     opacity: 1;
 }
+/* keep the running play icon green even when its row is selected
+   (otherwise "#sidebar row:selected image" repaints it white) */
+#sidebar row:selected button.btn-icon-run.running,
+#sidebar row:selected button.btn-icon-run.running image {
+    color: #27ae60;
+    opacity: 1;
+}
 
 /* -- dialog -- */
 dialog .dialog-action-area {
@@ -489,6 +496,7 @@ class ScriptRow(Gtk.ListBoxRow):
     _on_restart = None
     _on_select_script_settings = None
     _on_select_script_logs = None
+    _on_select_script_envs = None
     _on_open_terminal = None
 
     def __init__(self, script: dict):
@@ -587,6 +595,13 @@ class ScriptRow(Gtk.ListBoxRow):
         if ScriptRow._on_select_script_logs:
             logs_btn.connect("clicked", lambda _, s=self.script: ScriptRow._on_select_script_logs(s))
 
+        envs_btn = Gtk.Button()
+        envs_btn.set_image(Gtk.Image.new_from_icon_name("dialog-password-symbolic", Gtk.IconSize.MENU))
+        envs_btn.get_style_context().add_class("btn-icon")
+        envs_btn.set_tooltip_text("Env Vars")
+        if ScriptRow._on_select_script_envs:
+            envs_btn.connect("clicked", lambda _, s=self.script: ScriptRow._on_select_script_envs(s))
+
         settings_btn = Gtk.Button()
         settings_btn.set_image(Gtk.Image.new_from_icon_name("emblem-system-symbolic", Gtk.IconSize.MENU))
         settings_btn.get_style_context().add_class("btn-icon")
@@ -599,6 +614,7 @@ class ScriptRow(Gtk.ListBoxRow):
         self._action_box.pack_end(run_btn, False, False, 0)
         self._action_box.pack_end(term_btn, False, False, 0)
         self._action_box.pack_end(logs_btn, False, False, 0)
+        self._action_box.pack_end(envs_btn, False, False, 0)
         self._action_box.pack_end(settings_btn, False, False, 0)
 
         # Badges
@@ -644,6 +660,7 @@ class GroupRow(Gtk.ListBoxRow):
     _on_restart_script = None
     _on_select_script_settings = None
     _on_select_script_logs = None
+    _on_select_script_envs = None
     _on_open_terminal = None
     _shared_running_ids: set = set()
     _sort_modes: dict = {}  # gid -> sort mode
@@ -797,6 +814,13 @@ class GroupRow(Gtk.ListBoxRow):
         if GroupRow._on_select_script_logs:
             s_logs.connect("clicked", lambda _, s=script: GroupRow._on_select_script_logs(s))
 
+        s_envs = Gtk.Button()
+        s_envs.set_image(Gtk.Image.new_from_icon_name("dialog-password-symbolic", Gtk.IconSize.MENU))
+        s_envs.get_style_context().add_class("btn-icon")
+        s_envs.set_tooltip_text("Env Vars")
+        if GroupRow._on_select_script_envs:
+            s_envs.connect("clicked", lambda _, s=script: GroupRow._on_select_script_envs(s))
+
         s_settings = Gtk.Button()
         s_settings.set_image(Gtk.Image.new_from_icon_name("emblem-system-symbolic", Gtk.IconSize.MENU))
         s_settings.get_style_context().add_class("btn-icon")
@@ -809,6 +833,7 @@ class GroupRow(Gtk.ListBoxRow):
         row_box.pack_end(s_run, False, False, 0)
         row_box.pack_end(s_term, False, False, 0)
         row_box.pack_end(s_logs, False, False, 0)
+        row_box.pack_end(s_envs, False, False, 0)
         row_box.pack_end(s_settings, False, False, 0)
 
         port_str = script.get("port", "").strip()
@@ -2378,7 +2403,9 @@ class GroupForm(Gtk.Box):
         cfg = load_config()
         gid = self._group["id"] if self._group else ""
         self._loading = True
-        for s in cfg.get("scripts", []):
+        scripts = sorted(cfg.get("scripts", []),
+                         key=lambda s: s.get("name", "Unnamed").lower())
+        for s in scripts:
             cb = Gtk.CheckButton(label=s.get("name", "Unnamed"))
             cb.get_style_context().add_class("group-check")
             cb.set_active(gid in s.get("groups", []))
@@ -2485,6 +2512,9 @@ class ManagerWindow(Gtk.ApplicationWindow):
         export_item = Gtk.MenuItem(label="Export Scripts…")
         export_item.connect("activate", self._export_config)
         menu.append(export_item)
+        open_cfg_item = Gtk.MenuItem(label="Open Config File")
+        open_cfg_item.connect("activate", self._open_config_file)
+        menu.append(open_cfg_item)
         menu.append(Gtk.SeparatorMenuItem())
         reload_item = Gtk.MenuItem(label="Reload Tray")
         reload_item.connect("activate", self._reload_tray)
@@ -2778,6 +2808,7 @@ class ManagerWindow(Gtk.ApplicationWindow):
         ScriptRow._on_restart = self._restart_script
         ScriptRow._on_select_script_settings = self._open_script_settings
         ScriptRow._on_select_script_logs = self._open_script_logs
+        ScriptRow._on_select_script_envs = self._open_script_envs
         ScriptRow._on_open_terminal = self._open_terminal
         self._load_list()
         # Ctrl+F accelerator (works globally, even when focus is on an entry)
@@ -2916,6 +2947,7 @@ class ManagerWindow(Gtk.ApplicationWindow):
         GroupRow._on_restart_script = self._restart_script
         GroupRow._on_select_script_settings = self._open_script_settings
         GroupRow._on_select_script_logs = self._open_script_logs
+        GroupRow._on_select_script_envs = self._open_script_envs
         GroupRow._on_open_terminal = self._open_terminal
 
         query = self.groups_search_entry.get_text().lower().strip()
@@ -2965,6 +2997,7 @@ class ManagerWindow(Gtk.ApplicationWindow):
         GroupRow._on_restart_script = self._restart_script
         GroupRow._on_select_script_settings = self._open_script_settings
         GroupRow._on_select_script_logs = self._open_script_logs
+        GroupRow._on_select_script_envs = self._open_script_envs
         GroupRow._on_open_terminal = self._open_terminal
 
         for row in self.groups_listbox.get_children():
@@ -3078,6 +3111,12 @@ class ManagerWindow(Gtk.ApplicationWindow):
         """Navigate to a script's Logs tab from group view."""
         self.form.load_script(script)
         self.form.notebook.set_current_page(1)
+        self.right_stack.set_visible_child_name("script")
+
+    def _open_script_envs(self, script):
+        """Navigate to a script's Envs tab."""
+        self.form.load_script(script)
+        self.form.notebook.set_current_page(2)
         self.right_stack.set_visible_child_name("script")
 
     def _run_group(self, group):
@@ -3472,7 +3511,7 @@ class ManagerWindow(Gtk.ApplicationWindow):
         )
         dialog.add_buttons(Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL,
                            Gtk.STOCK_SAVE, Gtk.ResponseType.OK)
-        dialog.set_current_name("lazylauncher-config.json")
+        dialog.set_current_name(".lazylauncher-config.json")
         f = Gtk.FileFilter()
         f.set_name("JSON files")
         f.add_pattern("*.json")
@@ -3488,6 +3527,14 @@ class ManagerWindow(Gtk.ApplicationWindow):
                 self._show_toast(f"Export failed: {e}")
         else:
             dialog.destroy()
+
+    def _open_config_file(self, _widget=None):
+        """Open the config file in the system's default application."""
+        try:
+            subprocess.Popen(["xdg-open", str(CONFIG_FILE)])
+            self._show_toast(f"Opening {CONFIG_FILE.name}")
+        except Exception as e:
+            self._show_toast(f"Could not open config: {e}")
 
     # -- group management ------------------------------------------------------
 

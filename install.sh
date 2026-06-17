@@ -16,6 +16,18 @@ else
     echo "==> Installing LazyLauncher..."
 fi
 
+# ── 0. back up existing config (never lose user data) ──────────────────────────
+CONFIG_FILE="$CONFIG_DIR/.lazylauncher-config.json"
+if [ -f "$CONFIG_FILE" ]; then
+    BACKUP_DIR="$CONFIG_DIR/backups"
+    mkdir -p "$BACKUP_DIR"
+    BACKUP_FILE="$BACKUP_DIR/config-$(date +%Y%m%d-%H%M%S).json"
+    cp -p "$CONFIG_FILE" "$BACKUP_FILE"
+    echo "==> Backed up existing config to $BACKUP_FILE"
+    # Keep only the 20 most recent backups
+    ls -1t "$BACKUP_DIR"/config-*.json 2>/dev/null | tail -n +21 | xargs -r rm -f
+fi
+
 # If piped via curl (no local repo), clone to a temp directory first
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || true
 if [ -z "$SCRIPT_DIR" ] || [ ! -f "$SCRIPT_DIR/tray.py" ]; then
@@ -160,9 +172,9 @@ EOF
 sed -i "s|\$HOME|$HOME|g" "$AUTOSTART_DIR/lazylauncher.desktop"
 
 # ── 6. seed config if empty ───────────────────────────────────────────────────
-if [ ! -f "$CONFIG_DIR/config.json" ]; then
+if [ ! -f "$CONFIG_DIR/.lazylauncher-config.json" ]; then
     echo "==> Creating starter config..."
-    cat > "$CONFIG_DIR/config.json" << 'EOF'
+    cat > "$CONFIG_DIR/.lazylauncher-config.json" << 'EOF'
 {
   "scripts": [
     {

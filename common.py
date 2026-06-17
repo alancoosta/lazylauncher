@@ -10,7 +10,7 @@ import time
 from pathlib import Path
 
 CONFIG_DIR       = Path.home() / ".config" / "lazylauncher"
-CONFIG_FILE      = CONFIG_DIR / "config.json"
+CONFIG_FILE      = CONFIG_DIR / ".lazylauncher-config.json"
 ICON_DIR         = CONFIG_DIR / "icons"
 LOG_DIR          = CONFIG_DIR / "logs"
 RUN_STATE_FILE   = CONFIG_DIR / "run_state.json"

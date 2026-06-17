@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 LazyLauncher - Tray daemon
-Reads config from ~/.config/lazylauncher/config.json and builds
+Reads config from ~/.config/lazylauncher/.lazylauncher-config.json and builds
 an AppIndicator menu with all registered scripts.
 Also spawns one extra indicator per script that has pinned_icon=true.
 """
