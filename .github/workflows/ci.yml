@@ -1,0 +1,27 @@
+name: ci
+
+on: [push, pull_request]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install ruff pytest
+
+      # Lint: stop-the-build rules only (syntax errors, undefined names).
+      # Style/unused-import nags are intentionally not enforced here.
+      - name: Lint (errors only)
+        run: ruff check --select=E9,F63,F7,F82 .
+
+      # Tests. test_tray_pure skips itself when GTK/AppIndicator is absent
+      # (the CI box has no GTK), so this runs the GTK-free common.py suite.
+      - name: Tests
+        run: pytest -q
+
+      # Smoke: the GTK-free modules must import cleanly.
+      - name: Import smoke
+        run: python -c "import common, deps, ansi, log_view"

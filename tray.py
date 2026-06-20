@@ -8,10 +8,12 @@ Also spawns one extra indicator per script that has pinned_icon=true.
 
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
 import signal
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -19,11 +21,11 @@ from pathlib import Path
 from common import (
     CONFIG_DIR, CONFIG_FILE, ICON_DIR, LOG_DIR,
     RUN_STATE_FILE, ERROR_STATE_FILE,
-    _safe_write, load_config, save_config,
+    _safe_write, config_lock, load_config, save_config,
     get_error_states, get_running_ids,
     _get_pid_start_time, _is_pid_alive, _mark_stopped,
     find_script_pid, rotate_log, log_path,
-    normalize_env_vars,
+    normalize_env_vars, migrate_state, get_logger, ensure_seed_config,
 )
 
 import gi
@@ -37,7 +39,7 @@ except (ValueError, ImportError):
     from gi.repository import AppIndicator3
 
 gi.require_version("Gtk", "3.0")
-from gi.repository import Gtk, GLib, GdkPixbuf
+from gi.repository import Gtk, Gdk, GLib, GdkPixbuf
 
 DEFAULT_ICON_PATH = str(Path(__file__).parent / "icons" / "logo.svg")
 # Prefer themed icon name (installed to hicolor by install.sh) for crisp rendering;
@@ -114,35 +116,59 @@ def _handle_duplicate_run(script, script_id, label):
     return True
 
 
+def _process_on_port(port: int):
+    """Return (name, pid) of the process listening on a TCP port, or (None, None)."""
+    try:
+        r = subprocess.run(["ss", "-tlnp"], capture_output=True, text=True, timeout=3)
+        for line in r.stdout.splitlines():
+            stripped = line.rstrip()
+            if stripped.endswith(f":{port}") or f":{port} " in line:
+                m = re.search(r'\(\("([^"]+)",pid=(\d+)', line)
+                if m:
+                    return m.group(1), int(m.group(2))
+    except Exception:
+        pass
+    return None, None
+
+
 def _check_port_kill(script):
-    """Check if port needs killing, with confirmation for privileged ports. Returns False to abort."""
+    """Confirm before killing whatever holds the configured port. Returns False to abort."""
     port_str = script.get("port", "").strip()
     if not port_str or not port_str.isdigit():
         return True
     port = int(port_str)
     if not _is_port_in_use(port):
         return True
-    if port < 1024 or port in _WELL_KNOWN_PORTS:
-        dialog = Gtk.MessageDialog(
-            flags=Gtk.DialogFlags.MODAL,
-            message_type=Gtk.MessageType.WARNING,
-            buttons=Gtk.ButtonsType.YES_NO,
-            text=f"Kill process on privileged port :{port}?",
-        )
+
+    name, pid = _process_on_port(port)
+    privileged = port < 1024 or port in _WELL_KNOWN_PORTS
+    if name:
+        text = f"Kill {name} (PID {pid}) on port :{port}?"
+    else:
+        text = f"Kill the process on port :{port}?"
+
+    dialog = Gtk.MessageDialog(
+        flags=Gtk.DialogFlags.MODAL,
+        message_type=Gtk.MessageType.WARNING,
+        buttons=Gtk.ButtonsType.YES_NO,
+        text=text,
+    )
+    if privileged:
         dialog.format_secondary_text(
             f"Port {port} is a {'privileged' if port < 1024 else 'well-known service'} port. "
             "Killing it may disrupt system services."
         )
-        resp = dialog.run()
-        dialog.destroy()
-        if resp != Gtk.ResponseType.YES:
-            return False
+    resp = dialog.run()
+    dialog.destroy()
+    if resp != Gtk.ResponseType.YES:
+        return False
+
     kill_port(port)
     time.sleep(0.3)
     return True
 
 
-def _run_silent(cmd, cwd, env, script_id, label):
+def _run_silent(cmd, cwd, env, script_id, label, login_shell=True):
     """Run a script silently in the background with log capture."""
     log_file = None
     if script_id:
@@ -151,8 +177,9 @@ def _run_silent(cmd, cwd, env, script_id, label):
         log_file = open(lp, "a")
         log_file.write(f"\n{'='*60}\n[{__import__('datetime').datetime.now():%Y-%m-%d %H:%M:%S}] Running: {cmd}\n{'='*60}\n")
         log_file.flush()
+    shell_flag = "-ilc" if login_shell else "-c"
     proc = subprocess.Popen(
-        [USER_SHELL, "-ilc", cmd], cwd=cwd, env=env, start_new_session=True,
+        [USER_SHELL, shell_flag, cmd], cwd=cwd, env=env, start_new_session=True,
         stdout=log_file, stderr=log_file,
     )
     _mark_running(script_id, proc.pid)
@@ -161,41 +188,91 @@ def _run_silent(cmd, cwd, env, script_id, label):
     ).start()
 
 
-def _run_in_terminal(cmd, cwd, env, script_id, label):
-    """Run a script in a terminal emulator with log tee."""
-    log_header = ""
-    tee_suffix = ""
+def _write_launcher(cmd, cwd, log_str, pidfile, login_shell=True):
+    """Generate a temporary launcher script; return its path.
+
+    Putting ``cmd`` on its own line eliminates the nested-quoting fragility of
+    building a single shell string, and the launcher records the *real* shell
+    PID (``$$``) into ``pidfile`` so the tray can track the right process
+    instead of a terminal client that exits immediately.
+    """
+    L = ["#!/usr/bin/env bash", f"echo $$ > {shlex.quote(pidfile)}"]
+    if login_shell:
+        L += ['[ -f "$HOME/.profile" ] && . "$HOME/.profile"',
+              '[ -f "$HOME/.bashrc" ]  && . "$HOME/.bashrc"']
+    if log_str:
+        L.append(
+            'printf "\\n%s\\n[%s] Running\\n%s\\n" '
+            '"============================================================" '
+            '"$(date "+%Y-%m-%d %H:%M:%S")" '
+            '"============================================================" '
+            f">> {shlex.quote(log_str)}"
+        )
+    L.append(f"cd {shlex.quote(cwd)} || exit 1")
+    if log_str:
+        L += [f"{cmd} 2>&1 | tee -a {shlex.quote(log_str)}", "rc=${PIPESTATUS[0]}"]
+    else:
+        L += [cmd, "rc=$?"]
+    L += ["echo", 'echo "--- finished (exit $rc) ---"', 'read -p "Press Enter..."']
+    fd, path = tempfile.mkstemp(prefix="lazylauncher-", suffix=".sh")
+    with os.fdopen(fd, "w") as f:
+        f.write("\n".join(L) + "\n")
+    os.chmod(path, 0o700)
+    return path
+
+
+def _read_pidfile(pidfile, timeout=5.0):
+    """Read the real PID written by the launcher (with a short poll)."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            txt = Path(pidfile).read_text().strip()
+            if txt.isdigit():
+                return int(txt)
+        except OSError:
+            pass
+        time.sleep(0.1)
+    return 0
+
+
+def _run_in_terminal(cmd, cwd, env, script_id, label, login_shell=True):
+    """Run a script in a terminal emulator with log tee, tracking the real PID."""
+    log_str = ""
     if script_id:
         lp = log_path(script_id)
         rotate_log(lp)
-        log_str = shlex.quote(str(lp))
-        log_header = f"echo '\\n============================================================\\n['\\''$(date \"+%Y-%m-%d %H:%M:%S\")'\\''] Running: {shlex.quote(cmd)}\\n============================================================' >> {log_str}; "
-        tee_suffix = f" 2>&1 | tee -a {log_str}"
+        log_str = str(lp)
 
-    q_cwd = shlex.quote(cwd)
-    q_label = label
-    _prompt_msg = "Press Enter..."
-    _gnome_body = f"{log_header}cd {q_cwd} && {cmd}{tee_suffix}; echo; echo '--- finished ---'; read -p '{_prompt_msg}'"
-    _term_body = f"{log_header}cd {q_cwd} && {cmd}{tee_suffix}; echo; read -p '{_prompt_msg}'"
-    _term_body_quoted = f"{USER_SHELL} -ilc {shlex.quote(_term_body)}"
+    pidfile = str(Path(tempfile.gettempdir()) / f"lazylauncher-{script_id or 'x'}.pid")
+    try:
+        Path(pidfile).unlink()
+    except OSError:
+        pass
+    launcher = _write_launcher(cmd, cwd, log_str, pidfile, login_shell)
+    q = shlex.quote(launcher)
 
     terminals = [
-        ["gnome-terminal", "--title", q_label, "--", USER_SHELL, "-ilc", _gnome_body],
-        ["xfce4-terminal", "--title", q_label, "-e", _term_body_quoted],
-        ["xterm", "-title", q_label, "-e", _term_body_quoted],
-        ["konsole", "--title", q_label, "-e", _term_body_quoted],
+        ["gnome-terminal", "--title", label, "--", USER_SHELL, launcher],
+        ["foot",           "--title", label, USER_SHELL, launcher],          # native Wayland
+        ["kitty",          "--title", label, USER_SHELL, launcher],
+        ["wezterm", "start", "--", USER_SHELL, launcher],
+        ["alacritty",      "--title", label, "-e", USER_SHELL, launcher],
+        ["xfce4-terminal", "--title", label, "-e", f"{USER_SHELL} {q}"],
+        ["konsole",        "--title", label, "-e", f"{USER_SHELL} {q}"],
+        ["xterm",          "-title",  label, "-e", f"{USER_SHELL} {q}"],
     ]
 
     for term in terminals:
         try:
-            proc = subprocess.Popen(term, env=env, start_new_session=True)
-            _mark_running(script_id, proc.pid)
+            subprocess.Popen(term, env=env, start_new_session=True)
+            real_pid = _read_pidfile(pidfile)   # PID of the shell, not the terminal client
+            _mark_running(script_id, real_pid or 0)
             return
         except FileNotFoundError:
             continue
 
-    # Fallback: run silently in background
-    proc = subprocess.Popen([USER_SHELL, "-ilc", cmd], cwd=cwd, env=env, start_new_session=True)
+    # Fallback: run the launcher directly in the background (Popen pid is the shell)
+    proc = subprocess.Popen([USER_SHELL, launcher], cwd=cwd, env=env, start_new_session=True)
     _mark_running(script_id, proc.pid)
 
 
@@ -234,11 +311,12 @@ def run_script(script: dict):
 
     cwd = str(Path(cwd).expanduser())
     env = _parse_env_vars(script.get("env_vars", ""))
+    login_shell = script.get("login_shell", True)
 
     if silent:
-        _run_silent(cmd, cwd, env, script_id, label)
+        _run_silent(cmd, cwd, env, script_id, label, login_shell)
     else:
-        _run_in_terminal(cmd, cwd, env, script_id, label)
+        _run_in_terminal(cmd, cwd, env, script_id, label, login_shell)
 
 
 def _auto_detect_port(script_id: str, pid: int):
@@ -249,11 +327,15 @@ def _auto_detect_port(script_id: str, pid: int):
             return
         ports = find_ports_for_pid(pid)
         if ports:
-            cfg = load_config()
-            for s in cfg.get("scripts", []):
-                if s.get("id") == script_id and not s.get("port", "").strip():
-                    s["port"] = str(ports[0])
-                    _safe_write(CONFIG_FILE, json.dumps(cfg, indent=2))
+            with config_lock():
+                cfg = load_config()
+                changed = False
+                for s in cfg.get("scripts", []):
+                    if s.get("id") == script_id and not s.get("port", "").strip():
+                        s["port"] = str(ports[0])
+                        changed = True
+                if changed:
+                    save_config(cfg)
             return
 
 
@@ -352,6 +434,15 @@ def _mark_running(script_id: str, pid: int):
                 target=_auto_detect_port, args=(script_id, pid), daemon=True
             ).start()
             break
+
+
+def _stop_script(script_id: str):
+    """Terminate a tracked script by its process group, then mark it stopped."""
+    pid = find_script_pid(script_id)
+    if pid:
+        _kill_safe(os.killpg, os.getpgid(pid), signal.SIGTERM)
+        _kill_safe(os.kill, pid, signal.SIGTERM)
+    _mark_stopped(script_id)
 
 
 def _scan_running_commands() -> set:
@@ -553,10 +644,13 @@ class LazyLauncherTray:
         item = Gtk.MenuItem()
         box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         try:
+            # Render at the widget's scale factor so the icon stays crisp on HiDPI.
+            sf = max(1, box.get_scale_factor())
             pixbuf = GdkPixbuf.Pixbuf.new_from_file_at_size(
-                str(Path(__file__).parent / "icons" / "run-green.png"), 16, 16
+                str(Path(__file__).parent / "icons" / "run-green.png"), 16 * sf, 16 * sf
             )
-            box.pack_start(Gtk.Image.new_from_pixbuf(pixbuf), False, False, 0)
+            surface = Gdk.cairo_surface_create_from_pixbuf(pixbuf, sf, None)
+            box.pack_start(Gtk.Image.new_from_surface(surface), False, False, 0)
         except Exception:
             box.pack_start(Gtk.Image.new_from_icon_name("media-playback-start", Gtk.IconSize.MENU), False, False, 0)
         pid = find_script_pid(sid)
@@ -656,29 +750,63 @@ class LazyLauncherTray:
         if CONFIG_FILE.exists():
             mtime = CONFIG_FILE.stat().st_mtime
             if mtime != self._config_mtime:
-                os.execv(sys.executable, [sys.executable] + sys.argv)
+                self._config_mtime = mtime
+                self._build_menu()   # surgical rebuild; no process restart, no self-restart loop
         running = get_running_ids()
         if running != self._last_running:
             self._last_running = running
             self._build_menu()
         return True
 
-    def _quit(self, _widget=None):
+    def _shutdown(self):
+        """Quit cleanly without prompting (used by signals/logout)."""
         for ind in self.pinned_indicators:
             ind.set_status(AppIndicator3.IndicatorStatus.PASSIVE)
         Gtk.main_quit()
 
+    def _quit(self, _widget=None):
+        running = get_running_ids()
+        if running:
+            d = Gtk.MessageDialog(
+                flags=Gtk.DialogFlags.MODAL,
+                message_type=Gtk.MessageType.QUESTION,
+                buttons=Gtk.ButtonsType.NONE,
+                text=f"{len(running)} script(s) still running.",
+            )
+            d.format_secondary_text("Stop them before quitting?")
+            d.add_button("Leave running", Gtk.ResponseType.NO)
+            d.add_button("Cancel", Gtk.ResponseType.CANCEL)
+            stop_btn = d.add_button("Stop & quit", Gtk.ResponseType.YES)
+            stop_btn.get_style_context().add_class("destructive-action")
+            resp = d.run()
+            d.destroy()
+            if resp == Gtk.ResponseType.CANCEL:
+                return
+            if resp == Gtk.ResponseType.YES:
+                for sid in running:
+                    _stop_script(sid)
+        self._shutdown()
+
 
 def main():
+    migrate_state()
+    ensure_seed_config()
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     ICON_DIR.mkdir(parents=True, exist_ok=True)
     LOG_DIR.mkdir(parents=True, exist_ok=True)
 
-    signal.signal(signal.SIGTERM, lambda *_: Gtk.main_quit())
-    signal.signal(signal.SIGINT,  lambda *_: Gtk.main_quit())
+    log = get_logger()
+    log.info("tray starting")
 
-    LazyLauncherTray()
-    Gtk.main()
+    tray = LazyLauncherTray()
+    # Signals quit cleanly without a modal prompt (avoids blocking logout).
+    signal.signal(signal.SIGTERM, lambda *_: tray._shutdown())
+    signal.signal(signal.SIGINT,  lambda *_: tray._shutdown())
+
+    try:
+        Gtk.main()
+    finally:
+        log.info("tray stopped")
 
 
 if __name__ == "__main__":

@@ -106,6 +106,9 @@ mkdir -p "$INSTALL_DIR" "$BIN_DIR" "$CONFIG_DIR"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cp "$SCRIPT_DIR/lazylauncher.py" "$INSTALL_DIR/"
 cp "$SCRIPT_DIR/common.py"      "$INSTALL_DIR/"
+cp "$SCRIPT_DIR/deps.py"        "$INSTALL_DIR/"
+cp "$SCRIPT_DIR/ansi.py"        "$INSTALL_DIR/"
+cp "$SCRIPT_DIR/log_view.py"    "$INSTALL_DIR/"
 cp "$SCRIPT_DIR/tray.py"        "$INSTALL_DIR/"
 cp "$SCRIPT_DIR/manager.py"     "$INSTALL_DIR/"
 mkdir -p "$INSTALL_DIR/icons"
@@ -171,26 +174,9 @@ X-GNOME-Autostart-enabled=true
 EOF
 sed -i "s|\$HOME|$HOME|g" "$AUTOSTART_DIR/lazylauncher.desktop"
 
-# ── 6. seed config if empty ───────────────────────────────────────────────────
-if [ ! -f "$CONFIG_DIR/.lazylauncher-config.json" ]; then
-    echo "==> Creating starter config..."
-    cat > "$CONFIG_DIR/.lazylauncher-config.json" << 'EOF'
-{
-  "scripts": [
-    {
-      "id": "example1",
-      "name": "Example: List Files",
-      "command": "ls -lah",
-      "working_dir": "~",
-      "icon": "",
-      "pinned_icon": false,
-      "enabled": true,
-      "description": "Lists files in your home directory. Replace with your own script!"
-    }
-  ]
-}
-EOF
-fi
+# ── 6. starter config ─────────────────────────────────────────────────────────
+# The app seeds an example "Dev environment" group on first run
+# (common.ensure_seed_config), so no config is written here.
 
 # ── 7. restart running instances ──────────────────────────────────────────────
 if [ "$IS_UPDATE" = true ]; then

@@ -20,35 +20,22 @@ from pathlib import Path
 from common import (
     CONFIG_DIR, CONFIG_FILE, LOG_DIR,
     RUN_STATE_FILE, ERROR_STATE_FILE,
-    _safe_write, load_config, save_config,
+    _safe_write, config_lock, load_config, save_config,
     get_error_states, clear_error_state,
     get_running_ids, find_script_pid,
     _get_pid_start_time, _is_pid_alive, _mark_stopped,
     log_path, rotate_log,
-    normalize_env_vars,
+    normalize_env_vars, migrate_state, ensure_seed_config,
 )
+from deps import resolve_order, run_group_ordered
+import ansi
+import log_view
 
 import gi
 gi.require_version("Gtk", "3.0")
 from gi.repository import Gtk, Gdk, Pango, GLib, GObject
 
-# ANSI color code → hex color (adapted for dark background)
-_ANSI_COLORS_DARK = {
-    30: "#555555",  31: "#c0392b",  32: "#27ae60",  33: "#f39c12",
-    34: "#3498db",  35: "#8e44ad",  36: "#1abc9c",  37: "#c4bdb5",
-    90: "#7a746c",  91: "#e74c3c",  92: "#2ecc71",  93: "#f1c40f",
-    94: "#5dade2",  95: "#af7ac5",  96: "#48c9b0",  97: "#ede8e1",
-}
-_ANSI_COLORS_LIGHT = {
-    30: "#1a1a1a",  31: "#a31515",  32: "#1a7a40",  33: "#b06000",
-    34: "#1565c0",  35: "#6a1b9a",  36: "#00796b",  37: "#4a4a4a",
-    90: "#6a6a6a",  91: "#d32f2f",  92: "#2e7d32",  93: "#e0a000",
-    94: "#1976d2",  95: "#7b1fa2",  96: "#00897b",  97: "#2a2a2a",
-}
-ANSI_COLORS = _ANSI_COLORS_DARK  # default, updated at window init
-_ANSI_SGR_RE = re.compile(r'\x1b\[([0-9;]*)m')
-_ANSI_ALL_RE = re.compile(r'\x1b\[[0-9;]*[a-zA-Z]')
-_ANSI_OSC_RE = re.compile(r'\x1b\][^\x07]*\x07')
+# ANSI parsing + theme palettes live in ansi.py (GTK-free, unit-tested).
 
 _STOP_LABEL = "■  Stop"
 
@@ -56,6 +43,12 @@ _TIP_SORT_NAME_AZ = "Sort by name A→Z"
 _TIP_SORT_NAME_ZA = "Sort by name Z→A"
 _TIP_RUNNING_FIRST = "Running first"
 _TIP_STOPPED_FIRST = "Stopped first"
+
+
+def _port_sort_key(value) -> int:
+    """Numeric sort key for a port string ('' / non-numeric sort as 0)."""
+    p = str(value or "").strip()
+    return int(p) if p.isdigit() else 0
 
 
 def _find_all_script_pids(script_id: str) -> list[int]:
@@ -156,6 +149,20 @@ headerbar .subtitle {
 }
 .script-disabled .script-name {
     opacity: 0.35;
+}
+
+/* -- home table -- */
+.home-table treeview {
+    font-size: 13px;
+}
+.home-table treeview header button {
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.9px;
+    padding: 4px 6px;
+}
+.home-table treeview row {
+    min-height: 0;
 }
 
 /* -- badges (semantic colors kept) -- */
@@ -474,6 +481,8 @@ def new_script() -> dict:
         "port":        "",
         "confirm":     False,
         "silent":      True,
+        "login_shell": True,
+        "depends_on":  [],
         "groups":      [],
     }
 
@@ -633,6 +642,13 @@ class ScriptRow(Gtk.ListBoxRow):
             badge.set_tooltip_text(f"Last run failed with exit code {err.get('exit_code', '?')}")
             self._badge_box.pack_start(badge, False, False, 0)
 
+        deps = self.script.get("depends_on", [])
+        if deps:
+            badge = Gtk.Label(label=f"⛓ {len(deps)}")
+            badge.get_style_context().add_class("badge-pinned")
+            badge.set_tooltip_text(f"Depends on {len(deps)} script(s)")
+            self._badge_box.pack_start(badge, False, False, 0)
+
         if self.script.get("pinned_icon"):
             badge = Gtk.Label(label="PIN")
             badge.get_style_context().add_class("badge-pinned")
@@ -716,10 +732,26 @@ class GroupRow(Gtk.ListBoxRow):
         sort_mode = GroupRow._sort_modes.get(gid)
         if sort_mode and self._scripts:
             self._scripts = self._sort_list(self._scripts, sort_mode)
+        elif self._scripts:
+            # Default: show in dependency start order (falls back on a cycle).
+            try:
+                order = resolve_order(self._scripts)
+                pos = {sid: i for i, sid in enumerate(order)}
+                self._scripts = sorted(self._scripts, key=lambda s: pos.get(s.get("id", ""), 0))
+            except ValueError:
+                pass
 
         if self._scripts:
+            names = {s.get("id", ""): s.get("name", s.get("id", "")) for s in self._scripts}
             for script in self._scripts:
                 box.pack_start(self._build_script_row(script), False, False, 0)
+                dep_ids = [d for d in script.get("depends_on", []) if d in names]
+                if dep_ids:
+                    dep_lbl = Gtk.Label(label="    ↳ depends on " + ", ".join(names[d] for d in dep_ids))
+                    dep_lbl.set_halign(Gtk.Align.START)
+                    dep_lbl.get_style_context().add_class("form-hint")
+                    dep_lbl.set_ellipsize(Pango.EllipsizeMode.END)
+                    box.pack_start(dep_lbl, False, False, 0)
         else:
             empty_lbl = Gtk.Label(label="  No scripts in this group")
             empty_lbl.set_halign(Gtk.Align.START)
@@ -953,40 +985,6 @@ def _is_dark_theme():
     return luminance < 0.5
 
 
-def _theme_log_colors():
-    """Return syntax highlight colors adapted to the current theme."""
-    dark = _is_dark_theme()
-    if dark:
-        return {
-            "json-key": "#e08a6f",
-            "json-string": "#2ecc71",
-            "json-number": "#f0a050",
-            "json-bool": "#b07ad8",
-            "json-null": "#95a5a6",
-            "json-brace": "#5dade2",
-            "search-match-bg": "#e0c040",
-            "search-match-fg": "#1a1a1a",
-            "search-current-bg": "#f5a623",
-            "search-current-fg": "#1a1a1a",
-            "fold-accent": "#e08a6f",
-            "fold-hint": "#95a5a6",
-        }
-    return {
-        "json-key": "#a0522d",
-        "json-string": "#1a7a40",
-        "json-number": "#c06000",
-        "json-bool": "#6a1b9a",
-        "json-null": "#607d8b",
-        "json-brace": "#1565c0",
-        "search-match-bg": "#fff176",
-        "search-match-fg": "#1a1a1a",
-        "search-current-bg": "#ffb300",
-        "search-current-fg": "#1a1a1a",
-        "fold-accent": "#a0522d",
-        "fold-hint": "#607d8b",
-    }
-
-
 # -- edit form ------------------------------------------------------------------
 
 class EnvVarsTable(Gtk.Box):
@@ -1098,6 +1096,7 @@ class ScriptForm(Gtk.Box):
         self._script    = None
         self._loading   = False
         self._group_checkboxes = {}
+        self._dep_checkboxes = {}
         self._build()
 
     def _build(self):
@@ -1282,6 +1281,7 @@ class ScriptForm(Gtk.Box):
         self.enabled_switch = Gtk.Switch()
         self.confirm_switch = Gtk.Switch()
         self.silent_switch = Gtk.Switch()
+        self.login_shell_switch = Gtk.Switch()
 
         options_grid.attach(
             _option_cell("Pin as tray icon", "Dedicated icon in the panel", self.pin_switch),
@@ -1295,6 +1295,9 @@ class ScriptForm(Gtk.Box):
         options_grid.attach(
             _option_cell("Silent mode", "Background, notify when done", self.silent_switch),
             1, 1, 1, 1)
+        options_grid.attach(
+            _option_cell("Login shell", "Source ~/.profile & ~/.bashrc (PATH, nvm…)", self.login_shell_switch),
+            0, 2, 1, 1)
 
         inner.pack_start(options_grid, False, False, 0)
 
@@ -1328,6 +1331,22 @@ class ScriptForm(Gtk.Box):
         self._groups_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         inner.pack_start(self._groups_box, False, False, 0)
 
+        # -- Depends on --
+        spacer = Gtk.Box(); spacer.set_size_request(-1, 12)
+        inner.pack_start(spacer, False, False, 0)
+        dep_header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        dep_lbl = Gtk.Label(label="DEPENDS ON")
+        dep_lbl.set_halign(Gtk.Align.START)
+        dep_lbl.get_style_context().add_class("section-header")
+        dep_hint = Gtk.Label(label="Start after these (waits on their port)")
+        dep_hint.set_halign(Gtk.Align.START)
+        dep_hint.get_style_context().add_class("form-hint")
+        dep_header.pack_start(dep_lbl, False, False, 0)
+        dep_header.pack_start(dep_hint, False, False, 0)
+        inner.pack_start(dep_header, False, False, 0)
+
+        self._deps_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        inner.pack_start(self._deps_box, False, False, 0)
 
         scroll.add(inner)
         settings_box.pack_start(scroll, True, True, 0)
@@ -1426,7 +1445,7 @@ class ScriptForm(Gtk.Box):
         self.log_text_view.get_style_context().add_class("log-view")
 
         # JSON syntax highlight tags (theme-aware)
-        self._tc = _theme_log_colors()
+        self._tc = log_view.theme_log_colors(_is_dark_theme())
         buf = self.log_text_view.get_buffer()
         buf.create_tag("json-key", foreground=self._tc["json-key"], weight=Pango.Weight.BOLD)
         buf.create_tag("json-string", foreground=self._tc["json-string"])
@@ -1577,6 +1596,7 @@ class ScriptForm(Gtk.Box):
         self.port_entry.set_text(script.get("port", ""))
         self.confirm_switch.set_active(script.get("confirm", False))
         self.silent_switch.set_active(script.get("silent", False))
+        self.login_shell_switch.set_active(script.get("login_shell", True))
         self.run_btn.set_sensitive(bool(script.get("command", "").strip()))
         self.set_sensitive(True)
         self._loading = False
@@ -1590,6 +1610,7 @@ class ScriptForm(Gtk.Box):
             self._log_pending = False
         self._update_error_banner()
         self._rebuild_group_checkboxes()
+        self._rebuild_dep_checkboxes()
 
     def clear(self):
         self._script = None
@@ -1613,6 +1634,44 @@ class ScriptForm(Gtk.Box):
             for gid, cb in self._group_checkboxes.items():
                 cb.set_active(gid in script_groups)
             self._loading = False
+
+    def _rebuild_dep_checkboxes(self):
+        """List other scripts this one can depend on (multi-select).
+
+        Dependencies only take effect within a shared group at run time
+        (see deps.resolve_order), and a dependency is only waitable when it
+        has a port configured — that's flagged inline.
+        """
+        for child in self._deps_box.get_children():
+            self._deps_box.remove(child)
+        self._dep_checkboxes.clear()
+        if not self._script:
+            return
+        my_id = self._script.get("id", "")
+        cfg = load_config()
+        others = [s for s in cfg.get("scripts", []) if s.get("id") and s.get("id") != my_id]
+        if not others:
+            empty = Gtk.Label(label="No other scripts yet", xalign=0)
+            empty.get_style_context().add_class("form-hint")
+            self._deps_box.pack_start(empty, False, False, 0)
+            self._deps_box.show_all()
+            return
+        for s in others:
+            sid = s["id"]
+            has_port = str(s.get("port", "")).strip().isdigit()
+            suffix = "" if has_port else "   (no port — can't wait)"
+            cb = Gtk.CheckButton(label=f"{s.get('name', sid)}{suffix}")
+            cb.get_style_context().add_class("group-check")
+            cb.connect("toggled", lambda *_: self._auto_save())
+            self._dep_checkboxes[sid] = cb
+            self._deps_box.pack_start(cb, False, False, 0)
+        # Restore selection from current script
+        depends_on = self._script.get("depends_on", [])
+        self._loading = True
+        for sid, cb in self._dep_checkboxes.items():
+            cb.set_active(sid in depends_on)
+        self._loading = False
+        self._deps_box.show_all()
         self._groups_box.show_all()
 
     def _auto_save(self):
@@ -1667,14 +1726,14 @@ class ScriptForm(Gtk.Box):
 
     def _append_tail_content(self, buf, raw, old_clean, clean):
         """Append only the new portion of log content (no flicker)."""
-        pos_map = self._build_clean_to_raw_map(raw)
+        pos_map = log_view.build_clean_to_raw_map(raw)
         raw_offset = pos_map[len(old_clean)] if len(old_clean) < len(pos_map) else len(raw)
         tail_raw = raw[raw_offset:]
         tail_clean = clean[len(old_clean):]
 
         self._log_scroll_internal = True
         cursor = buf.create_mark("log-cursor", buf.get_end_iter(), False)
-        tail_blocks = self._find_json_blocks(tail_clean)
+        tail_blocks = log_view.find_json_blocks(tail_clean)
         if not tail_blocks:
             self._insert_ansi_text(buf, cursor, tail_raw)
         else:
@@ -1688,7 +1747,7 @@ class ScriptForm(Gtk.Box):
 
     def _insert_buffered_blocks(self, buf, cursor, raw, clean, blocks):
         """Insert a mix of ANSI text and collapsible JSON blocks."""
-        pos_map = self._build_clean_to_raw_map(raw)
+        pos_map = log_view.build_clean_to_raw_map(raw)
         last_raw_end = 0
         last_clean_end = 0
         for cs, ce, obj in blocks:
@@ -1722,7 +1781,7 @@ class ScriptForm(Gtk.Box):
             return
         raw = self._read_log_raw(lp)
         buf = self.log_text_view.get_buffer()
-        clean = _ANSI_ALL_RE.sub('', _ANSI_OSC_RE.sub('', raw))
+        clean = ansi.strip(raw)
         if clean == self._last_log_clean:
             return
         old_clean = self._last_log_clean
@@ -1751,50 +1810,6 @@ class ScriptForm(Gtk.Box):
 
     # ── collapsible JSON buffer builder ──
 
-    @staticmethod
-    def _is_complex_json(obj):
-        """Check if a JSON object is complex enough to warrant collapsible rendering."""
-        if not isinstance(obj, (dict, list)):
-            return False
-        if isinstance(obj, dict):
-            return len(obj) >= 2 or any(isinstance(v, (dict, list)) for v in obj.values())
-        return len(obj) >= 2 or any(isinstance(v, (dict, list)) for v in obj)
-
-    @staticmethod
-    def _find_json_blocks(text):
-        """Find JSON blocks in text — only at line boundaries with sufficient complexity."""
-        decoder = json.JSONDecoder()
-        blocks = []
-        for m in re.finditer(r'^[ \t]*([{\[])', text, re.MULTILINE):
-            i = m.start(1)
-            try:
-                obj, end = decoder.raw_decode(text, i)
-            except ValueError:
-                continue
-            if ScriptForm._is_complex_json(obj):
-                blocks.append((i, end, obj))
-        return blocks
-
-    @staticmethod
-    def _build_clean_to_raw_map(raw):
-        """Map character positions in ANSI-stripped text back to raw text positions."""
-        pos_map = []
-        raw_i = 0
-        raw_n = len(raw)
-        while raw_i < raw_n:
-            m = _ANSI_OSC_RE.match(raw, raw_i)
-            if m:
-                raw_i = m.end()
-                continue
-            m = _ANSI_ALL_RE.match(raw, raw_i)
-            if m:
-                raw_i = m.end()
-                continue
-            pos_map.append(raw_i)
-            raw_i += 1
-        pos_map.append(raw_i)
-        return pos_map
-
     def _clear_fold_tags(self, buf):
         """Remove fold-specific tags from previous buffer build."""
         table = buf.get_tag_table()
@@ -1810,14 +1825,14 @@ class ScriptForm(Gtk.Box):
         """Build log buffer with ANSI colors and collapsible JSON blocks."""
         self._clear_fold_tags(buf)
         buf.set_text("")
-        clean = _ANSI_ALL_RE.sub('', _ANSI_OSC_RE.sub('', raw))
-        blocks = self._find_json_blocks(clean)
+        clean = ansi.strip(raw)
+        blocks = log_view.find_json_blocks(clean)
         cursor = buf.create_mark("log-cursor", buf.get_end_iter(), False)
         if not blocks:
             self._insert_ansi_text(buf, cursor, raw)
             buf.delete_mark(cursor)
             return
-        pos_map = self._build_clean_to_raw_map(raw)
+        pos_map = log_view.build_clean_to_raw_map(raw)
         last_raw_end = 0
         last_clean_end = 0
         for clean_start, clean_end, obj in blocks:
@@ -1831,49 +1846,31 @@ class ScriptForm(Gtk.Box):
             self._insert_ansi_text(buf, cursor, raw[last_raw_end:])
         buf.delete_mark(cursor)
 
-    @staticmethod
-    def _parse_ansi_sgr(codes_str):
-        """Parse an ANSI SGR code string into (fg, bold) state changes."""
-        fg, bold = None, False
-        codes = [int(c) for c in codes_str.split(';') if c.isdigit()] if codes_str else [0]
-        for code in codes:
-            if code == 0:
-                fg, bold = None, False
-            elif code == 1:
-                bold = True
-            elif code == 22:
-                bold = False
-            elif code in ANSI_COLORS:
-                fg = code
-            elif code == 39:
-                fg = None
-        return fg, bold
-
     def _insert_ansi_text(self, buf, cursor, text):
         """Insert text with ANSI color processing at cursor mark position."""
-        text = _ANSI_OSC_RE.sub('', text)
+        text = ansi.OSC_RE.sub('', text)
         fg = None
         bold = False
         last = 0
-        for m in _ANSI_SGR_RE.finditer(text):
+        for m in ansi.SGR_RE.finditer(text):
             before = text[last:m.start()]
             if before:
-                before = _ANSI_ALL_RE.sub('', before)
+                before = ansi.ALL_RE.sub('', before)
                 if before:
                     self._insert_ansi_chunk(buf, cursor, before, fg, bold)
-            fg, bold = self._parse_ansi_sgr(m.group(1))
+            fg, bold = ansi.parse_sgr(m.group(1))
             last = m.end()
-        remaining = _ANSI_ALL_RE.sub('', text[last:])
+        remaining = ansi.ALL_RE.sub('', text[last:])
         if remaining:
             self._insert_ansi_chunk(buf, cursor, remaining, fg, bold)
 
     def _insert_ansi_chunk(self, buf, cursor, text, fg_code, bold):
         """Insert a text chunk with ANSI-derived color at cursor mark."""
         it = buf.get_iter_at_mark(cursor)
-        if fg_code and fg_code in ANSI_COLORS:
+        if fg_code and fg_code in ansi.ANSI_COLORS:
             tag_name = f"ansi-{fg_code}{'-b' if bold else ''}"
             if not buf.get_tag_table().lookup(tag_name):
-                kw = {"foreground": ANSI_COLORS[fg_code]}
+                kw = {"foreground": ansi.ANSI_COLORS[fg_code]}
                 if bold:
                     kw["weight"] = Pango.Weight.BOLD
                 buf.create_tag(tag_name, **kw)
@@ -1884,13 +1881,6 @@ class ScriptForm(Gtk.Box):
             buf.insert_with_tags_by_name(it, text, "ansi-bold")
         else:
             buf.insert(it, text)
-
-    @staticmethod
-    def _hash_json(obj):
-        try:
-            return hash(json.dumps(obj, sort_keys=True, default=str))
-        except (TypeError, ValueError):
-            return id(obj)
 
     def _insert_at_cursor(self, buf, cursor, text, tag=None):
         """Insert text at cursor mark, optionally with a tag."""
@@ -1915,16 +1905,6 @@ class ScriptForm(Gtk.Box):
         self._insert_at_cursor(buf, cursor, "\u25BC ", f"jte-{fold_id}")
         self._insert_at_cursor(buf, cursor, "\u25B6 ", f"jtc-{fold_id}")
 
-    @staticmethod
-    def _make_json_summary(obj, close_br):
-        """Build the one-line summary shown when a JSON block is collapsed."""
-        if isinstance(obj, dict):
-            preview = ", ".join(list(obj.keys())[:3])
-            if len(obj) > 3:
-                preview += ", \u2026"
-            return f" {preview} {close_br}"
-        return f" {len(obj)} items {close_br}"
-
     def _insert_json_content(self, buf, cursor, obj, indent, is_dict):
         """Insert the expanded content of a JSON object or array."""
         pad = "  " * (indent + 1)
@@ -1946,7 +1926,7 @@ class ScriptForm(Gtk.Box):
 
     def _get_fold_state(self, obj):
         """Get the initial collapsed state for a JSON object."""
-        content_hash = self._hash_json(obj)
+        content_hash = log_view.hash_json(obj)
         return self._fold_states.get(content_hash, False), content_hash
 
     def _insert_collapsible_json(self, buf, cursor, obj, indent):
@@ -1966,7 +1946,7 @@ class ScriptForm(Gtk.Box):
         open_br, close_br = ("{", "}") if is_dict else ("[", "]")
         self._insert_at_cursor(buf, cursor, open_br, "json-brace")
 
-        summary = self._make_json_summary(obj, close_br)
+        summary = log_view.make_json_summary(obj, close_br)
         self._insert_at_cursor(buf, cursor, summary, f"js-{fold_id}")
 
         content_start = buf.create_mark(None, buf.get_iter_at_mark(cursor), True)
@@ -2192,6 +2172,8 @@ class ScriptForm(Gtk.Box):
         self._script["port"]        = self.port_entry.get_text().strip()
         self._script["confirm"]     = self.confirm_switch.get_active()
         self._script["silent"]      = self.silent_switch.get_active()
+        self._script["login_shell"] = self.login_shell_switch.get_active()
+        self._script["depends_on"]  = [sid for sid, cb in self._dep_checkboxes.items() if cb.get_active()]
         self._script["groups"]      = [gid for gid, cb in self._group_checkboxes.items() if cb.get_active()]
         self._script.pop("icon", None)  # custom-icon feature removed; drop stale data
         self._on_save(self._script)
@@ -2211,6 +2193,7 @@ class ScriptForm(Gtk.Box):
             "env_vars":    self.env_entry.get_env_vars(),
             "confirm":     self.confirm_switch.get_active(),
             "silent":      self.silent_switch.get_active(),
+            "login_shell": self.login_shell_switch.get_active(),
         }
         self._on_run(temp_script)
 
@@ -2418,18 +2401,19 @@ class GroupForm(Gtk.Box):
     def _toggle_script(self, script_id, active):
         if self._loading or not self._group:
             return
-        cfg = load_config()
-        gid = self._group["id"]
-        for s in cfg.get("scripts", []):
-            if s["id"] == script_id:
-                groups = s.get("groups", [])
-                if active and gid not in groups:
-                    groups.append(gid)
-                elif not active and gid in groups:
-                    groups.remove(gid)
-                s["groups"] = groups
-                break
-        save_config(cfg)
+        with config_lock():
+            cfg = load_config()
+            gid = self._group["id"]
+            for s in cfg.get("scripts", []):
+                if s["id"] == script_id:
+                    groups = s.get("groups", [])
+                    if active and gid not in groups:
+                        groups.append(gid)
+                    elif not active and gid in groups:
+                        groups.remove(gid)
+                    s["groups"] = groups
+                    break
+            save_config(cfg)
         if self._on_scripts_changed:
             self._on_scripts_changed(self._group)
 
@@ -2481,8 +2465,7 @@ class ManagerWindow(Gtk.ApplicationWindow):
                 self.set_icon_from_file(str(logo_path))
 
         # Set ANSI colors based on theme
-        global ANSI_COLORS
-        ANSI_COLORS = _ANSI_COLORS_LIGHT if not _is_dark_theme() else _ANSI_COLORS_DARK
+        ansi.set_theme(_is_dark_theme())
 
         # CSS
         provider = Gtk.CssProvider()
@@ -2523,10 +2506,32 @@ class ManagerWindow(Gtk.ApplicationWindow):
         menu_btn.set_popup(menu)
         hb.pack_start(menu_btn)
 
+        # View switcher: Home (table) | Editor (sidebar + form)
+        view_switch = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        view_switch.set_name("group-tabs")
+        self._switching_view = False
+        self.view_home_btn = Gtk.ToggleButton(label="Home")
+        self.view_home_btn.set_mode(False)
+        self.view_home_btn.get_style_context().add_class("group-tab")
+        self.view_home_btn.set_active(True)
+        self.view_home_btn.connect("toggled", lambda b: self._on_view_toggled(b, "home"))
+        self.view_editor_btn = Gtk.ToggleButton(label="Editor")
+        self.view_editor_btn.set_mode(False)
+        self.view_editor_btn.get_style_context().add_class("group-tab")
+        self.view_editor_btn.connect("toggled", lambda b: self._on_view_toggled(b, "detail"))
+        view_switch.pack_start(self.view_home_btn, False, False, 0)
+        view_switch.pack_start(self.view_editor_btn, False, False, 0)
+        hb.set_custom_title(view_switch)
+
+        # Top-level stack: home table vs. detail editor
+        self.outer_stack = Gtk.Stack()
+        self.outer_stack.set_transition_type(Gtk.StackTransitionType.CROSSFADE)
+        self.outer_stack.set_transition_duration(100)
+        self.add(self.outer_stack)
+
         # Main layout
         hpaned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
         hpaned.set_position(400)
-        self.add(hpaned)
 
         # -- Left: list --
         left_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
@@ -2803,6 +2808,12 @@ class ManagerWindow(Gtk.ApplicationWindow):
 
         hpaned.pack2(self.right_stack, True, False)
 
+        # Register the two top-level screens; open on Home.
+        self.outer_stack.add_named(self._build_home_screen(), "home")
+        self.outer_stack.add_named(hpaned, "detail")
+        self.outer_stack.set_visible_child_name("home")
+        self.outer_stack.connect("notify::visible-child", self._on_view_changed)
+
         ScriptRow._on_run = self._run_script
         ScriptRow._on_stop = self._stop_single_script
         ScriptRow._on_restart = self._restart_script
@@ -2929,6 +2940,7 @@ class ManagerWindow(Gtk.ApplicationWindow):
                 self.right_stack.set_visible_child_name("script")
 
     def _rebuild_groups_view(self):
+        self._reload_home_groups()
         for child in self.groups_listbox.get_children():
             self.groups_listbox.remove(child)
 
@@ -3016,10 +3028,11 @@ class ManagerWindow(Gtk.ApplicationWindow):
                 self._select_group(row.group)
 
     def _new_group_and_select(self):
-        cfg = load_config()
         group = new_group("New Group")
-        cfg.setdefault("groups", []).append(group)
-        save_config(cfg)
+        with config_lock():
+            cfg = load_config()
+            cfg.setdefault("groups", []).append(group)
+            save_config(cfg)
         self._rebuild_groups_view()
         self.form._rebuild_group_checkboxes()
         self._select_group(group)
@@ -3035,27 +3048,29 @@ class ManagerWindow(Gtk.ApplicationWindow):
         self._rebuild_groups_view()
 
     def _save_group(self, updated):
-        cfg = load_config()
-        for i, g in enumerate(cfg.get("groups", [])):
-            if g["id"] == updated["id"]:
-                cfg["groups"][i] = updated
-                break
-        save_config(cfg)
+        with config_lock():
+            cfg = load_config()
+            for i, g in enumerate(cfg.get("groups", [])):
+                if g["id"] == updated["id"]:
+                    cfg["groups"][i] = updated
+                    break
+            save_config(cfg)
         self._rebuild_groups_view()
         self.form._rebuild_group_checkboxes()
 
     def _duplicate_group(self, group):
         if not group:
             return
-        cfg = load_config()
         dup = new_group(f"{group.get('name', 'Group')} (copy)")
         dup["description"] = group.get("description", "")
-        cfg.setdefault("groups", []).append(dup)
-        # Copy script associations
-        for s in cfg.get("scripts", []):
-            if group["id"] in s.get("groups", []):
-                s.setdefault("groups", []).append(dup["id"])
-        save_config(cfg)
+        with config_lock():
+            cfg = load_config()
+            cfg.setdefault("groups", []).append(dup)
+            # Copy script associations
+            for s in cfg.get("scripts", []):
+                if group["id"] in s.get("groups", []):
+                    s.setdefault("groups", []).append(dup["id"])
+            save_config(cfg)
         self._rebuild_groups_view()
         self.form._rebuild_group_checkboxes()
         self._select_group(dup)
@@ -3077,11 +3092,12 @@ class ManagerWindow(Gtk.ApplicationWindow):
         ok = dialog.add_button("Delete", Gtk.ResponseType.OK)
         ok.get_style_context().add_class("btn-danger")
         if dialog.run() == Gtk.ResponseType.OK:
-            cfg = load_config()
-            cfg["groups"] = [g for g in cfg.get("groups", []) if g["id"] != group["id"]]
-            for s in cfg.get("scripts", []):
-                s["groups"] = [gid for gid in s.get("groups", []) if gid != group["id"]]
-            save_config(cfg)
+            with config_lock():
+                cfg = load_config()
+                cfg["groups"] = [g for g in cfg.get("groups", []) if g["id"] != group["id"]]
+                for s in cfg.get("scripts", []):
+                    s["groups"] = [gid for gid in s.get("groups", []) if gid != group["id"]]
+                save_config(cfg)
             self.group_form.clear()
             self.right_stack.set_visible_child_name("script")
             self._rebuild_groups_view()
@@ -3123,14 +3139,32 @@ class ManagerWindow(Gtk.ApplicationWindow):
         cfg = load_config()
         gid = group["id"]
         from tray import run_script
-        count = 0
-        for script in cfg.get("scripts", []):
-            if gid in script.get("groups", []) and script.get("enabled", True):
-                run_script(script)
-                count += 1
+        group_scripts = [
+            s for s in cfg.get("scripts", [])
+            if gid in s.get("groups", []) and s.get("enabled", True)
+        ]
+        if not group_scripts:
+            return
+        run_group_ordered(
+            group_scripts,
+            run_one=run_script,
+            dispatch=GLib.idle_add,
+            already_running=get_running_ids(),
+            on_event=self._on_dep_event,
+        )
         GLib.timeout_add(500, lambda: self._refresh_running_badges() and False)
         GLib.timeout_add(600, lambda: self._rebuild_groups_view() or False)
-        self._show_toast(f"Running {count} script(s) from '{group['name']}'")
+        self._show_toast(f"Running '{group['name']}' in dependency order…")
+
+    def _on_dep_event(self, kind, sid, detail):
+        """Progress callback for run_group_ordered (already on the GTK thread)."""
+        if kind == "timeout":
+            self._show_toast(f"⏱ Timed out waiting for {detail}")
+        elif kind == "error":
+            self._show_toast(f"⚠ {detail}")
+        elif kind == "ready":
+            self._refresh_running_badges()
+        return False
 
     def _stop_group(self, group):
         cfg = load_config()
@@ -3180,26 +3214,28 @@ class ManagerWindow(Gtk.ApplicationWindow):
         group = self.group_form._group
         if not group:
             return
-        cfg = load_config()
-        groups = cfg.get("groups", [])
-        idx = next((i for i, g in enumerate(groups) if g["id"] == group["id"]), -1)
-        if idx <= 0:
-            return
-        groups[idx - 1], groups[idx] = groups[idx], groups[idx - 1]
-        save_config(cfg)
+        with config_lock():
+            cfg = load_config()
+            groups = cfg.get("groups", [])
+            idx = next((i for i, g in enumerate(groups) if g["id"] == group["id"]), -1)
+            if idx <= 0:
+                return
+            groups[idx - 1], groups[idx] = groups[idx], groups[idx - 1]
+            save_config(cfg)
         self._rebuild_groups_view()
 
     def _move_group_down(self, _widget):
         group = self.group_form._group
         if not group:
             return
-        cfg = load_config()
-        groups = cfg.get("groups", [])
-        idx = next((i for i, g in enumerate(groups) if g["id"] == group["id"]), -1)
-        if idx < 0 or idx >= len(groups) - 1:
-            return
-        groups[idx + 1], groups[idx] = groups[idx], groups[idx + 1]
-        save_config(cfg)
+        with config_lock():
+            cfg = load_config()
+            groups = cfg.get("groups", [])
+            idx = next((i for i, g in enumerate(groups) if g["id"] == group["id"]), -1)
+            if idx < 0 or idx >= len(groups) - 1:
+                return
+            groups[idx + 1], groups[idx] = groups[idx], groups[idx + 1]
+            save_config(cfg)
         self._rebuild_groups_view()
 
     def _sort_groups(self, mode):
@@ -3246,6 +3282,434 @@ class ManagerWindow(Gtk.ApplicationWindow):
         if self._sidebar_mode == "groups":
             self._rebuild_groups_view()
 
+    # -- Home table -------------------------------------------------------------
+
+    # ListStore column indices: id is hidden, the rest map to script fields.
+    _HOME_COL_ID, _HOME_COL_NAME, _HOME_COL_PORT, _HOME_COL_CMD, _HOME_COL_WD = range(5)
+    _HOME_FIELDS = {
+        _HOME_COL_NAME: "name",
+        _HOME_COL_PORT: "port",
+        _HOME_COL_CMD: "command",
+        _HOME_COL_WD: "working_dir",
+    }
+
+    # Group table is a tree: each group row holds its scripts as child rows.
+    # kind distinguishes "group" vs "script"; child rows mirror the scripts
+    # table columns (name / port / command / working dir). Group rows only
+    # use the name column.
+    (_HOME_G_COL_ID, _HOME_G_COL_KIND, _HOME_G_COL_NAME,
+     _HOME_G_COL_PORT, _HOME_G_COL_CMD, _HOME_G_COL_WD) = range(6)
+    _HOME_G_FIELDS = {
+        _HOME_G_COL_NAME: "name",
+        _HOME_G_COL_PORT: "port",
+        _HOME_G_COL_CMD: "command",
+        _HOME_G_COL_WD: "working_dir",
+    }
+
+    # Per-row action icons shared by both home tables (title, icon, key).
+    _HOME_ACTIONS = [
+        ("Run", "media-playback-start-symbolic", "run"),
+        ("Stop", "media-playback-stop-symbolic", "stop"),
+        ("Settings", "emblem-system-symbolic", "settings"),
+        ("Logs", "text-x-generic-symbolic", "logs"),
+        ("Env", "dialog-password-symbolic", "envs"),
+    ]
+
+    def _build_home_screen(self):
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        page.get_style_context().add_class("home-table")
+
+        # Sub-tabs: Scripts | Groups (same pattern as the editor sidebar)
+        self._home_mode = "scripts"
+        self._switching_home_tab = False
+        tab_bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        tab_bar.set_name("group-tabs")
+        tab_bar.set_margin_start(8)
+        tab_bar.set_margin_end(8)
+        tab_bar.set_margin_top(8)
+        self.home_scripts_tab = Gtk.ToggleButton(label="Scripts")
+        self.home_scripts_tab.set_mode(False)
+        self.home_scripts_tab.get_style_context().add_class("group-tab")
+        self.home_scripts_tab.set_active(True)
+        self.home_scripts_tab.connect("toggled", lambda b: self._on_home_tab_toggled(b, "scripts"))
+        self.home_groups_tab = Gtk.ToggleButton(label="Groups")
+        self.home_groups_tab.set_mode(False)
+        self.home_groups_tab.get_style_context().add_class("group-tab")
+        self.home_groups_tab.connect("toggled", lambda b: self._on_home_tab_toggled(b, "groups"))
+        tab_bar.pack_start(self.home_scripts_tab, True, True, 0)
+        tab_bar.pack_start(self.home_groups_tab, True, True, 0)
+        page.pack_start(tab_bar, False, False, 0)
+
+        self.home_inner_stack = Gtk.Stack()
+        self.home_inner_stack.set_transition_type(Gtk.StackTransitionType.SLIDE_LEFT_RIGHT)
+        self.home_inner_stack.set_transition_duration(150)
+        self.home_inner_stack.add_named(self._build_home_scripts_page(), "scripts")
+        self.home_inner_stack.add_named(self._build_home_groups_page(), "groups")
+        page.pack_start(self.home_inner_stack, True, True, 0)
+        return page
+
+    def _build_home_toolbar(self, new_label, new_cb, placeholder, search_cb):
+        """Build the shared '+ New …' button + filter entry toolbar.
+        Returns (toolbar, search_entry)."""
+        toolbar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        toolbar.set_name("list-toolbar")
+        toolbar.set_margin_start(8)
+        toolbar.set_margin_end(8)
+        toolbar.set_margin_top(8)
+        toolbar.set_margin_bottom(6)
+
+        new_btn = Gtk.Button(label=new_label)
+        new_btn.get_style_context().add_class("btn-primary")
+        new_btn.connect("clicked", new_cb)
+        toolbar.pack_start(new_btn, False, False, 0)
+
+        search = Gtk.SearchEntry()
+        search.get_style_context().add_class("form-entry")
+        search.set_placeholder_text(placeholder)
+        search.set_hexpand(True)
+        search.connect("search-changed", search_cb)
+        toolbar.pack_start(search, True, True, 0)
+        return toolbar, search
+
+    def _add_text_columns(self, tree, columns, on_edited):
+        """Append editable, ellipsized text columns from (title, col, width,
+        expand) specs to a home table; wires sorting and the edit callback."""
+        for title, col, width, expand in columns:
+            renderer = Gtk.CellRendererText()
+            renderer.set_property("editable", True)
+            renderer.set_property("ellipsize", Pango.EllipsizeMode.END)
+            renderer.set_padding(6, 1)
+            renderer.connect("edited", on_edited, col)
+            column = Gtk.TreeViewColumn(title, renderer, text=col)
+            column.set_resizable(True)
+            column.set_sort_column_id(col)
+            column.set_expand(expand)
+            column.set_min_width(width if not expand else 160)
+            if not expand:
+                column.set_fixed_width(width)
+            tree.append_column(column)
+
+    def _add_action_columns(self, tree, on_click):
+        """Append the shared per-row action icon columns to a home table and
+        wire its button-press handler. Returns the {column: key} map."""
+        action_columns = {}
+        for title, icon, key in self._HOME_ACTIONS:
+            action_columns[self._append_action_column(tree, title, icon)] = key
+        tree.connect("button-press-event", on_click)
+        return action_columns
+
+    def _set_port_sort(self, store, col):
+        """Sort a home table's port column numerically (blank/non-numeric = 0)."""
+        store.set_sort_func(
+            col,
+            lambda m, a, b, _: _port_sort_key(m[a][col]) - _port_sort_key(m[b][col]),
+        )
+
+    def _build_home_scripts_page(self):
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+
+        toolbar, self.home_search_entry = self._build_home_toolbar(
+            "+ New Script", self._new_script, "Filter scripts…", self._reload_home_table)
+        page.pack_start(toolbar, False, False, 0)
+
+        self.home_store = Gtk.ListStore(str, str, str, str, str)
+        self._set_port_sort(self.home_store, self._HOME_COL_PORT)
+
+        self.home_tree = Gtk.TreeView(model=self.home_store)
+        self.home_tree.set_enable_search(False)
+        self._add_text_columns(self.home_tree, [
+            ("Name", self._HOME_COL_NAME, 220, False),
+            ("Port", self._HOME_COL_PORT, 70, False),
+            ("Command", self._HOME_COL_CMD, 320, True),
+            ("Working directory", self._HOME_COL_WD, 280, True),
+        ], self._home_cell_edited)
+        # Per-row action icons — discoverable access to a script's config.
+        self._home_action_columns = self._add_action_columns(
+            self.home_tree, self._home_tree_button_press)
+
+        scroll = Gtk.ScrolledWindow()
+        scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+        scroll.set_vexpand(True)
+        scroll.add(self.home_tree)
+        page.pack_start(scroll, True, True, 0)
+        return page
+
+    def _append_action_column(self, tree, title, icon_name):
+        """Add a fixed-width clickable icon column to a home table."""
+        renderer = Gtk.CellRendererPixbuf()
+        renderer.set_property("icon-name", icon_name)
+        renderer.set_alignment(0.5, 0.5)
+        renderer.set_padding(6, 1)
+        column = Gtk.TreeViewColumn(title, renderer)
+        column.set_alignment(0.5)
+        column.set_resizable(False)
+        column.set_min_width(56)
+        column.set_fixed_width(64)
+        tree.append_column(column)
+        return column
+
+    def _build_home_groups_page(self):
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+
+        toolbar, self.home_groups_search_entry = self._build_home_toolbar(
+            "+ New Group", lambda _: self._new_group_and_select(),
+            "Filter groups…", self._reload_home_groups)
+        page.pack_start(toolbar, False, False, 0)
+
+        # TreeStore: group parent rows + script child rows, mirroring the
+        # scripts table columns (id, kind, name, port, command, working dir).
+        self.home_groups_store = Gtk.TreeStore(str, str, str, str, str, str)
+        self._set_port_sort(self.home_groups_store, self._HOME_G_COL_PORT)
+
+        self.home_groups_tree = Gtk.TreeView(model=self.home_groups_store)
+        self.home_groups_tree.set_enable_search(False)
+        self.home_groups_tree.set_enable_tree_lines(True)
+        self._add_text_columns(self.home_groups_tree, [
+            ("Name", self._HOME_G_COL_NAME, 300, False),
+            ("Port", self._HOME_G_COL_PORT, 70, False),
+            ("Command", self._HOME_G_COL_CMD, 320, True),
+            ("Working directory", self._HOME_G_COL_WD, 280, True),
+        ], self._home_group_cell_edited)
+        # Same action set as the scripts table; on group rows run/stop/settings
+        # act on the whole group while logs/env are no-ops.
+        self._home_group_action_columns = self._add_action_columns(
+            self.home_groups_tree, self._home_groups_tree_button_press)
+
+        scroll = Gtk.ScrolledWindow()
+        scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+        scroll.set_vexpand(True)
+        scroll.add(self.home_groups_tree)
+        page.pack_start(scroll, True, True, 0)
+        return page
+
+    def _on_home_tab_toggled(self, button, mode):
+        if self._switching_home_tab or not button.get_active():
+            return
+        self._switching_home_tab = True
+        self.home_scripts_tab.set_active(mode == "scripts")
+        self.home_groups_tab.set_active(mode == "groups")
+        self._switching_home_tab = False
+        self._home_mode = mode
+        self.home_inner_stack.set_visible_child_name(mode)
+        if mode == "groups":
+            self._reload_home_groups()
+        else:
+            self._reload_home_table()
+
+    def _reload_home_groups(self, *_):
+        if not hasattr(self, "home_groups_store"):
+            return
+        query = self.home_groups_search_entry.get_text().lower()
+        cfg = load_config()
+        scripts = cfg.get("scripts", [])
+        self.home_groups_store.clear()
+        for g in cfg.get("groups", []):
+            gid = g.get("id", "")
+            members = [s for s in scripts if gid in s.get("groups", [])]
+            if query:
+                hay = (g.get("name", "") + " " + g.get("description", "")).lower()
+                member_hit = any(
+                    query in (s.get("name", "") + " " + s.get("command", "")).lower()
+                    for s in members
+                )
+                if query not in hay and not member_hit:
+                    continue
+            parent = self.home_groups_store.append(None, [
+                gid, "group", g.get("name", ""), "", "", "",
+            ])
+            for s in members:
+                self.home_groups_store.append(parent, [
+                    s.get("id", ""), "script", s.get("name", ""),
+                    s.get("port", ""), s.get("command", ""), s.get("working_dir", ""),
+                ])
+        self.home_groups_tree.expand_all()
+
+    def _find_script(self, script_id):
+        return next((s for s in load_config().get("scripts", [])
+                     if s.get("id") == script_id), None)
+
+    def _find_group(self, group_id):
+        return next((g for g in load_config().get("groups", [])
+                     if g.get("id") == group_id), None)
+
+    def _reload_home_active(self, *_):
+        """Reload only the currently visible home sub-table."""
+        if getattr(self, "_home_mode", "scripts") == "groups":
+            self._reload_home_groups()
+        else:
+            self._reload_home_table()
+
+    def _update_config_item(self, key, item_id, field, value):
+        """Set a field on a script/group by id; return the updated dict or None."""
+        updated = None
+        with config_lock():
+            cfg = load_config()
+            for item in cfg.get(key, []):
+                if item.get("id") == item_id:
+                    item[field] = value
+                    updated = dict(item)
+                    break
+            save_config(cfg)
+        return updated
+
+    def _home_group_cell_edited(self, _renderer, path, new_text, col):
+        new_text = new_text.strip()
+        row = self.home_groups_store[path]
+        obj_id = row[self._HOME_G_COL_ID]
+        if row[self._HOME_G_COL_KIND] == "group":
+            # Group rows only carry a name; ignore edits on the script columns.
+            if col != self._HOME_G_COL_NAME or not new_text:
+                return
+            updated = self._update_config_item("groups", obj_id, "name", new_text)
+            if updated is None:
+                return
+            row[col] = new_text
+            # Keep the editor side in sync (sidebar rows + checkboxes + open form).
+            self._rebuild_groups_view()
+            self.form._rebuild_group_checkboxes()
+            if self.group_form._group and self.group_form._group.get("id") == obj_id:
+                self.group_form.load_group(updated)
+        else:  # script child row — same fields as the scripts table
+            field = self._HOME_G_FIELDS[col]
+            if field == "name" and not new_text:
+                return
+            if field == "port" and new_text and not new_text.isdigit():
+                return  # ports are numeric; ignore invalid edits
+            updated = self._update_config_item("scripts", obj_id, field, new_text)
+            if updated is None:
+                return
+            row[col] = new_text
+            self._load_list()  # refresh sidebar + scripts table + group tree
+            if self.form._script and self.form._script.get("id") == obj_id:
+                self.form.load_script(updated)
+
+    def _home_open_group(self, group_id):
+        group = self._find_group(group_id)
+        if not group:
+            return
+        self.outer_stack.set_visible_child_name("detail")
+        self._switch_tab("groups")
+        for row in self.groups_listbox.get_children():
+            if isinstance(row, GroupRow) and row.group.get("id") == group_id:
+                self.groups_listbox.select_row(row)
+                break
+        self._select_group(group)
+
+    def _home_group_action(self, key, group_id):
+        # run/stop/settings act on the whole group; logs/env are n/a for groups.
+        if key == "settings":
+            self._home_open_group(group_id)
+        elif key in ("run", "stop"):
+            group = self._find_group(group_id)
+            if group:
+                (self._run_group if key == "run" else self._stop_group)(group)
+
+    def _home_groups_tree_button_press(self, tree, event):
+        if event.button != 1:
+            return False
+        info = tree.get_path_at_pos(int(event.x), int(event.y))
+        if not info:
+            return False
+        path, column, _, _ = info
+        key = self._home_group_action_columns.get(column)
+        if not key:
+            return False
+        row = self.home_groups_store[path]
+        obj_id = row[self._HOME_G_COL_ID]
+        if row[self._HOME_G_COL_KIND] == "script":
+            self._home_script_action(key, obj_id)
+        else:
+            self._home_group_action(key, obj_id)
+        return True
+
+    def _reload_home_table(self, *_):
+        if not hasattr(self, "home_store"):
+            return
+        query = self.home_search_entry.get_text().lower()
+        self.home_store.clear()
+        for s in load_config().get("scripts", []):
+            if query:
+                hay = (s.get("name", "") + " " + s.get("command", "")).lower()
+                if query not in hay:
+                    continue
+            self.home_store.append([
+                s.get("id", ""),
+                s.get("name", ""),
+                s.get("port", ""),
+                s.get("command", ""),
+                s.get("working_dir", ""),
+            ])
+
+    def _home_cell_edited(self, _renderer, path, new_text, col):
+        field = self._HOME_FIELDS.get(col)
+        if field is None:
+            return
+        new_text = new_text.strip()
+        if field == "port" and new_text and not new_text.isdigit():
+            return  # ports are numeric; ignore invalid edits
+        script_id = self.home_store[path][self._HOME_COL_ID]
+        updated = self._update_config_item("scripts", script_id, field, new_text)
+        if updated is None:
+            return
+        self.home_store[path][col] = new_text
+        # Keep the editor side in sync (sidebar rows + open form).
+        self._load_list()
+        if self.form._script and self.form._script.get("id") == script_id:
+            self.form.load_script(updated)
+
+    def _home_open_script(self, script_id, page=0):
+        """Open a script in the editor at the given notebook page (0=Settings,
+        1=Logs, 2=Envs) and switch to the detail view."""
+        script = self._find_script(script_id)
+        if not script:
+            return
+        if self._sidebar_mode != "all":
+            self._switch_tab("all")
+        for row in self.listbox.get_children():
+            if row.script.get("id") == script_id:
+                self.listbox.select_row(row)
+                break
+        self.form.load_script(script)
+        self.form.notebook.set_current_page(page)
+        self.right_stack.set_visible_child_name("script")
+        self.outer_stack.set_visible_child_name("detail")
+
+    def _home_tree_button_press(self, tree, event):
+        if event.button != 1:
+            return False
+        info = tree.get_path_at_pos(int(event.x), int(event.y))
+        if not info:
+            return False
+        path, column, _, _ = info
+        key = self._home_action_columns.get(column)
+        if not key:
+            return False
+        script_id = self.home_store[path][self._HOME_COL_ID]
+        self._home_script_action(key, script_id)
+        return True
+
+    def _home_script_action(self, key, script_id):
+        if key in ("run", "stop"):
+            script = self._find_script(script_id)
+            if script:
+                (self._run_script if key == "run" else self._stop_single_script)(script)
+        else:
+            self._home_open_script(script_id, {"settings": 0, "logs": 1, "envs": 2}[key])
+
+    def _on_view_toggled(self, button, view):
+        if self._switching_view or not button.get_active():
+            return
+        self.outer_stack.set_visible_child_name(view)
+
+    def _on_view_changed(self, *_):
+        name = self.outer_stack.get_visible_child_name()
+        self._switching_view = True
+        self.view_home_btn.set_active(name == "home")
+        self.view_editor_btn.set_active(name == "detail")
+        self._switching_view = False
+        if name == "home":
+            self._reload_home_active()
+
     def _load_list(self):
         for row in self.listbox.get_children():
             self.listbox.remove(row)
@@ -3259,6 +3723,7 @@ class ManagerWindow(Gtk.ApplicationWindow):
             self._rebuild_groups_view()
         if self.group_form._group:
             self.group_form._rebuild_script_checkboxes()
+        self._reload_home_active()
 
     def _filter_row(self, row: ScriptRow) -> bool:
         query = self.search_entry.get_text().lower()
@@ -3288,21 +3753,23 @@ class ManagerWindow(Gtk.ApplicationWindow):
         idx = self._selected_index()
         if idx <= 0:
             return
-        cfg     = load_config()
-        scripts = cfg["scripts"]
-        scripts[idx - 1], scripts[idx] = scripts[idx], scripts[idx - 1]
-        save_config(cfg)
+        with config_lock():
+            cfg     = load_config()
+            scripts = cfg["scripts"]
+            scripts[idx - 1], scripts[idx] = scripts[idx], scripts[idx - 1]
+            save_config(cfg)
         self._load_list()
         self.listbox.select_row(self.listbox.get_row_at_index(idx - 1))
 
     def _move_down(self, _widget):
         idx = self._selected_index()
-        cfg = load_config()
-        scripts = cfg["scripts"]
-        if idx < 0 or idx >= len(scripts) - 1:
-            return
-        scripts[idx + 1], scripts[idx] = scripts[idx], scripts[idx + 1]
-        save_config(cfg)
+        with config_lock():
+            cfg = load_config()
+            scripts = cfg["scripts"]
+            if idx < 0 or idx >= len(scripts) - 1:
+                return
+            scripts[idx + 1], scripts[idx] = scripts[idx], scripts[idx + 1]
+            save_config(cfg)
         self._load_list()
         self.listbox.select_row(self.listbox.get_row_at_index(idx + 1))
 
@@ -3313,8 +3780,7 @@ class ManagerWindow(Gtk.ApplicationWindow):
         selected_id = selected_row.script.get("id") if selected_row else None
 
         def _port_key(s):
-            p = s.get("port", "").strip()
-            return int(p) if p.isdigit() else 0
+            return _port_sort_key(s.get("port", ""))
 
         running = get_running_ids()
 
@@ -3343,9 +3809,10 @@ class ManagerWindow(Gtk.ApplicationWindow):
 
     def _new_script(self, _widget=None):
         script = new_script()
-        cfg    = load_config()
-        cfg["scripts"].append(script)
-        save_config(cfg)
+        with config_lock():
+            cfg = load_config()
+            cfg["scripts"].append(script)
+            save_config(cfg)
         if self._sidebar_mode != "all":
             self._switch_tab("all")
         self._load_list()
@@ -3359,12 +3826,13 @@ class ManagerWindow(Gtk.ApplicationWindow):
             self.form.name_entry.grab_focus()
 
     def _save_script(self, updated: dict):
-        cfg = load_config()
-        for i, s in enumerate(cfg["scripts"]):
-            if s["id"] == updated["id"]:
-                cfg["scripts"][i] = updated
-                break
-        save_config(cfg)
+        with config_lock():
+            cfg = load_config()
+            for i, s in enumerate(cfg["scripts"]):
+                if s["id"] == updated["id"]:
+                    cfg["scripts"][i] = updated
+                    break
+            save_config(cfg)
         # Update the sidebar row in place
         ScriptRow._shared_error_states = get_error_states()
         for row in self.listbox.get_children():
@@ -3393,9 +3861,10 @@ class ManagerWindow(Gtk.ApplicationWindow):
         dialog.destroy()
         if resp != Gtk.ResponseType.OK:
             return
-        cfg = load_config()
-        cfg["scripts"] = [s for s in cfg["scripts"] if s["id"] != script["id"]]
-        save_config(cfg)
+        with config_lock():
+            cfg = load_config()
+            cfg["scripts"] = [s for s in cfg["scripts"] if s["id"] != script["id"]]
+            save_config(cfg)
         self.form.clear()
         self._load_list()
 
@@ -3443,15 +3912,16 @@ class ManagerWindow(Gtk.ApplicationWindow):
         dup["id"] = str(uuid.uuid4())[:8]
         dup["name"] = script.get("name", "") + " (copy)"
         dup["groups"] = list(script.get("groups", []))
-        cfg = load_config()
-        # Insert after current script
-        idx = -1
-        for i, s in enumerate(cfg["scripts"]):
-            if s["id"] == script.get("id"):
-                idx = i
-                break
-        cfg["scripts"].insert(idx + 1, dup)
-        save_config(cfg)
+        with config_lock():
+            cfg = load_config()
+            # Insert after current script
+            idx = -1
+            for i, s in enumerate(cfg["scripts"]):
+                if s["id"] == script.get("id"):
+                    idx = i
+                    break
+            cfg["scripts"].insert(idx + 1, dup)
+            save_config(cfg)
         self._load_list()
         row = self.listbox.get_row_at_index(idx + 1)
         if row:
@@ -3486,18 +3956,19 @@ class ManagerWindow(Gtk.ApplicationWindow):
             if not scripts:
                 self._show_toast("No scripts found in file")
                 return
-            cfg = load_config()
-            existing_ids = {s["id"] for s in cfg["scripts"]}
-            added = 0
-            for s in scripts:
-                if s.get("id") not in existing_ids:
-                    cfg["scripts"].append(s)
-                    added += 1
-            existing_gids = {g["id"] for g in cfg.get("groups", [])}
-            for g in imported.get("groups", []):
-                if g.get("id") not in existing_gids:
-                    cfg.setdefault("groups", []).append(g)
-            save_config(cfg)
+            with config_lock():
+                cfg = load_config()
+                existing_ids = {s["id"] for s in cfg["scripts"]}
+                added = 0
+                for s in scripts:
+                    if s.get("id") not in existing_ids:
+                        cfg["scripts"].append(s)
+                        added += 1
+                existing_gids = {g["id"] for g in cfg.get("groups", [])}
+                for g in imported.get("groups", []):
+                    if g.get("id") not in existing_gids:
+                        cfg.setdefault("groups", []).append(g)
+                save_config(cfg)
             self._load_list()
             self._show_toast(f"Imported {added} script(s)")
         except Exception as e:
@@ -3562,6 +4033,8 @@ class ManagerApp(Gtk.Application):
 
 
 def main():
+    migrate_state()
+    ensure_seed_config()
     app = ManagerApp()
     app.run(sys.argv)
 

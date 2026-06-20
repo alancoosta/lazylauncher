@@ -4,31 +4,116 @@ LazyLauncher - Shared constants and helpers.
 Used by both tray.py and manager.py.
 """
 
+import fcntl
 import json
+import logging
 import os
+import tempfile
 import time
+from contextlib import contextmanager
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-CONFIG_DIR       = Path.home() / ".config" / "lazylauncher"
-CONFIG_FILE      = CONFIG_DIR / ".lazylauncher-config.json"
-ICON_DIR         = CONFIG_DIR / "icons"
-LOG_DIR          = CONFIG_DIR / "logs"
-RUN_STATE_FILE   = CONFIG_DIR / "run_state.json"
-ERROR_STATE_FILE = CONFIG_DIR / "error_state.json"
+VERSION = "1.0.0"
+
+# Config (durable, user-editable, safe to sync/export) lives under XDG_CONFIG_HOME.
+CONFIG_DIR  = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "lazylauncher"
+CONFIG_FILE = CONFIG_DIR / ".lazylauncher-config.json"
+ICON_DIR    = CONFIG_DIR / "icons"
+LOCK_FILE   = CONFIG_DIR / ".lazylauncher.lock"
+
+# Runtime state (logs, pids, last-exit) lives under XDG_STATE_HOME so that
+# exporting/syncing the config never drags machine-specific runtime along.
+STATE_DIR        = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state")) / "lazylauncher"
+LOG_DIR          = STATE_DIR / "logs"
+RUN_STATE_FILE   = STATE_DIR / "run_state.json"
+ERROR_STATE_FILE = STATE_DIR / "error_state.json"
+APP_LOG_FILE     = STATE_DIR / "lazylauncher.log"
 
 MAX_LOG_SIZE   = 1024 * 1024        # 1 MB per log file
 MAX_LOG_AGE    = 30 * 24 * 60 * 60  # 30 days in seconds
 
 
+def migrate_state():
+    """One-time move of runtime state out of the config dir into STATE_DIR.
+
+    Earlier versions kept logs, run_state.json and error_state.json under
+    ``~/.config/lazylauncher``. Relocate them so config stays portable. Safe to
+    call on every boot: it only acts when the old locations still exist.
+    """
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        moves = [
+            (CONFIG_DIR / "logs", LOG_DIR),
+            (CONFIG_DIR / "run_state.json", RUN_STATE_FILE),
+            (CONFIG_DIR / "error_state.json", ERROR_STATE_FILE),
+        ]
+        for old, new in moves:
+            if old.exists() and not new.exists():
+                os.replace(str(old), str(new))
+    except OSError:
+        pass
+
+
+_logger = None
+
+
+def get_logger() -> logging.Logger:
+    """Return the app logger, writing to STATE_DIR/lazylauncher.log (rotating)."""
+    global _logger
+    if _logger is None:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        log = logging.getLogger("lazylauncher")
+        log.setLevel(logging.INFO)
+        if not log.handlers:
+            handler = RotatingFileHandler(
+                str(APP_LOG_FILE), maxBytes=MAX_LOG_SIZE, backupCount=1
+            )
+            handler.setFormatter(
+                logging.Formatter("%(asctime)s %(levelname)s %(message)s")
+            )
+            log.addHandler(handler)
+        _logger = log
+    return _logger
+
+
 def _safe_write(path: Path, data):
-    """Write data to a file atomically using tmp + rename, with restricted permissions."""
-    tmp = path.with_suffix(".tmp")
-    if isinstance(data, str):
-        tmp.write_text(data)
-    else:
-        tmp.write_bytes(data)
-    os.replace(str(tmp), str(path))
-    os.chmod(str(path), 0o600)
+    """Write data to a file atomically using a unique tmp + rename.
+
+    The tmp file gets a unique name (mkstemp) in the same directory as the
+    target so two concurrent writers never collide on a shared ``.tmp`` path.
+    """
+    mode = "w" if isinstance(data, str) else "wb"
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=path.name + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, mode) as f:
+            f.write(data)
+        os.replace(tmp, str(path))
+        os.chmod(str(path), 0o600)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+@contextmanager
+def config_lock():
+    """Serialize read-modify-write of the config between tray and manager.
+
+    Any block that loads the config, mutates it, and saves it back should run
+    inside ``with config_lock():`` so concurrent writers don't clobber each
+    other's updates (a lost-update race).
+    """
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    f = open(LOCK_FILE, "w")
+    try:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(f, fcntl.LOCK_UN)
+        f.close()
 
 
 def normalize_env_vars(raw) -> list:
@@ -71,6 +156,42 @@ def load_config() -> dict:
 def save_config(cfg: dict):
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     _safe_write(CONFIG_FILE, json.dumps(cfg, indent=2))
+
+
+def ensure_seed_config():
+    """Seed a small example config on first run so the tray isn't empty.
+
+    Only acts when no config file exists yet (installers may also seed one).
+    Ships a 'Dev environment' group with two example scripts to demonstrate
+    grouping and both run modes.
+    """
+    if CONFIG_FILE.exists():
+        return
+    cfg = {
+        "scripts": [
+            {
+                "id": "example-files", "name": "Example: List Files",
+                "command": "ls -lah", "working_dir": str(Path.home()),
+                "pinned_icon": False, "enabled": True,
+                "description": "Lists your home directory. Replace with your own!",
+                "env_vars": [], "port": "", "confirm": False,
+                "silent": False, "login_shell": True, "groups": ["example-dev"],
+            },
+            {
+                "id": "example-clock", "name": "Example: Clock (silent)",
+                "command": "date && sleep 2", "working_dir": str(Path.home()),
+                "pinned_icon": False, "enabled": True,
+                "description": "Runs in the background and notifies when done.",
+                "env_vars": [], "port": "", "confirm": False,
+                "silent": True, "login_shell": True, "groups": ["example-dev"],
+            },
+        ],
+        "groups": [
+            {"id": "example-dev", "name": "Dev environment",
+             "description": "Example group — edit or delete me."},
+        ],
+    }
+    save_config(cfg)
 
 
 def get_error_states() -> dict:
@@ -180,7 +301,12 @@ def find_script_pid(script_id: str) -> int:
 
 
 def rotate_log(path: Path):
-    """Rotate log file: delete if older than MAX_LOG_AGE, truncate if larger than MAX_LOG_SIZE."""
+    """Rotate log file: delete if older than MAX_LOG_AGE, roll over if too large.
+
+    Size-based rotation preserves one generation: the current log is renamed to
+    ``<name>.log.1`` (replacing any previous one) and a fresh log is started on
+    the next write, instead of destructively cutting the file in half.
+    """
     try:
         if not path.exists():
             return
@@ -188,10 +314,14 @@ def rotate_log(path: Path):
         if time.time() - path.stat().st_mtime > MAX_LOG_AGE:
             path.unlink()
             return
-        # Size-based rotation: keep the last half
+        # Size-based rotation: keep the previous generation as .log.1
         if path.stat().st_size > MAX_LOG_SIZE:
-            data = path.read_bytes()
-            path.write_bytes(data[len(data) // 2:])
+            prev = path.with_suffix(".log.1")
+            try:
+                prev.unlink()
+            except OSError:
+                pass
+            path.rename(prev)
     except OSError:
         pass
 
