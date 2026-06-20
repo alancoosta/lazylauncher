@@ -7,7 +7,6 @@ Writes to ~/.config/lazylauncher/.lazylauncher-config.json.
 The tray daemon hot-reloads that file automatically.
 """
 
-import json
 import os
 import signal
 import subprocess
@@ -26,6 +25,7 @@ from common import (
 from deps import run_group_ordered
 from sorting import port_sort_key, sort_scripts
 import ansi
+import config_io
 
 import gi
 gi.require_version("Gtk", "3.0")
@@ -1956,24 +1956,13 @@ class ManagerWindow(Gtk.ApplicationWindow):
 
     def _do_import(self, path):
         try:
-            with open(path) as f:
-                imported = json.load(f)
-            scripts = imported.get("scripts", [])
-            if not scripts:
+            imported = config_io.read_config_file(path)
+            if not imported.get("scripts"):
                 self._show_toast("No scripts found in file")
                 return
             with config_lock():
                 cfg = load_config()
-                existing_ids = {s["id"] for s in cfg["scripts"]}
-                added = 0
-                for s in scripts:
-                    if s.get("id") not in existing_ids:
-                        cfg["scripts"].append(s)
-                        added += 1
-                existing_gids = {g["id"] for g in cfg.get("groups", [])}
-                for g in imported.get("groups", []):
-                    if g.get("id") not in existing_gids:
-                        cfg.setdefault("groups", []).append(g)
+                cfg, added = config_io.merge_imported(cfg, imported)
                 save_config(cfg)
             self._load_list()
             self._show_toast(f"Imported {added} script(s)")
@@ -1997,8 +1986,7 @@ class ManagerWindow(Gtk.ApplicationWindow):
             path = dialog.get_filename()
             dialog.destroy()
             try:
-                import shutil
-                shutil.copy2(str(CONFIG_FILE), path)
+                config_io.export_config_to(path)
                 self._show_toast(f"Exported to {Path(path).name}")
             except Exception as e:
                 self._show_toast(f"Export failed: {e}")
