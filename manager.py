@@ -493,45 +493,7 @@ class ManagerWindow(Gtk.ApplicationWindow):
             Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
         )
 
-        # Header bar
-        hb = Gtk.HeaderBar()
-        hb.set_show_close_button(True)
-        hb.set_title("LazyLauncher")
-        hb.set_subtitle("")
-        self.set_titlebar(hb)
-
-        # Hamburger menu
-        menu_btn = Gtk.MenuButton()
-        menu_btn.set_image(Gtk.Image.new_from_icon_name("open-menu-symbolic", Gtk.IconSize.MENU))
-        menu_btn.get_style_context().add_class("btn-icon")
-
-        menu = Gtk.Menu()
-        import_item = Gtk.MenuItem(label="Import Scripts…")
-        import_item.connect("activate", self._import_config)
-        menu.append(import_item)
-        export_item = Gtk.MenuItem(label="Export Scripts…")
-        export_item.connect("activate", self._export_config)
-        menu.append(export_item)
-        open_cfg_item = Gtk.MenuItem(label="Open Config File")
-        open_cfg_item.connect("activate", self._open_config_file)
-        menu.append(open_cfg_item)
-        menu.append(Gtk.SeparatorMenuItem())
-        reload_item = Gtk.MenuItem(label="Reload Tray")
-        reload_item.connect("activate", self._reload_tray)
-        menu.append(reload_item)
-        menu.show_all()
-        menu_btn.set_popup(menu)
-        hb.pack_start(menu_btn)
-
-        # View switcher: Home (table) | Editor (sidebar + form)
-        view_switch = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
-        view_switch.set_name("group-tabs")
-        self._switching_view = False
-        self.view_home_btn = self._make_tab_button("Home", "home", self._on_view_toggled, active=True)
-        self.view_editor_btn = self._make_tab_button("Editor", "detail", self._on_view_toggled)
-        view_switch.pack_start(self.view_home_btn, False, False, 0)
-        view_switch.pack_start(self.view_editor_btn, False, False, 0)
-        hb.set_custom_title(view_switch)
+        self._build_headerbar()
 
         # Top-level stack: home table vs. detail editor
         self.outer_stack = Gtk.Stack()
@@ -577,6 +539,90 @@ class ManagerWindow(Gtk.ApplicationWindow):
         self.sidebar_stack.set_transition_type(Gtk.StackTransitionType.SLIDE_LEFT_RIGHT)
         self.sidebar_stack.set_transition_duration(150)
 
+        self.sidebar_stack.add_named(self._build_all_page(), "all")
+
+        self.sidebar_stack.add_named(self._build_groups_page(), "groups")
+
+        left_box.pack_start(self.sidebar_stack, True, True, 0)
+
+        hpaned.pack1(left_box, False, False)
+
+        hpaned.pack2(self._build_right_stack(), True, False)
+
+        # Register the two top-level screens; open on Home.
+        self.outer_stack.add_named(self._build_home_screen(), "home")
+        self.outer_stack.add_named(hpaned, "detail")
+        self.outer_stack.set_visible_child_name("home")
+        self.outer_stack.connect("notify::visible-child", self._on_view_changed)
+
+        ScriptRow._on_run = self._run_script
+        ScriptRow._on_stop = self._stop_single_script
+        ScriptRow._on_restart = self._restart_script
+        ScriptRow._on_select_script_settings = self._open_script_settings
+        ScriptRow._on_select_script_logs = self._open_script_logs
+        ScriptRow._on_select_script_envs = self._open_script_envs
+        ScriptRow._on_open_terminal = self._open_terminal
+        self._load_list()
+        # Ctrl+F accelerator (works globally, even when focus is on an entry)
+        accel = Gtk.AccelGroup()
+        accel.connect(Gdk.KEY_f, Gdk.ModifierType.CONTROL_MASK, 0,
+                      lambda *_: self._toggle_log_search() or True)
+        self.add_accel_group(accel)
+        self.show_all()
+        # Select first script if available
+        first = self.listbox.get_row_at_index(0)
+        if first:
+            self.listbox.select_row(first)
+        else:
+            self.form.clear()
+
+        # Auto-refresh logs tab + detect state changes for badges
+        self._last_error_state = get_error_states()
+        self._last_running_state = get_running_ids()
+        GLib.timeout_add_seconds(2, self._refresh_logs_tab)
+
+    def _build_headerbar(self):
+        # Header bar
+        hb = Gtk.HeaderBar()
+        hb.set_show_close_button(True)
+        hb.set_title("LazyLauncher")
+        hb.set_subtitle("")
+        self.set_titlebar(hb)
+
+        # Hamburger menu
+        menu_btn = Gtk.MenuButton()
+        menu_btn.set_image(Gtk.Image.new_from_icon_name("open-menu-symbolic", Gtk.IconSize.MENU))
+        menu_btn.get_style_context().add_class("btn-icon")
+
+        menu = Gtk.Menu()
+        import_item = Gtk.MenuItem(label="Import Scripts…")
+        import_item.connect("activate", self._import_config)
+        menu.append(import_item)
+        export_item = Gtk.MenuItem(label="Export Scripts…")
+        export_item.connect("activate", self._export_config)
+        menu.append(export_item)
+        open_cfg_item = Gtk.MenuItem(label="Open Config File")
+        open_cfg_item.connect("activate", self._open_config_file)
+        menu.append(open_cfg_item)
+        menu.append(Gtk.SeparatorMenuItem())
+        reload_item = Gtk.MenuItem(label="Reload Tray")
+        reload_item.connect("activate", self._reload_tray)
+        menu.append(reload_item)
+        menu.show_all()
+        menu_btn.set_popup(menu)
+        hb.pack_start(menu_btn)
+
+        # View switcher: Home (table) | Editor (sidebar + form)
+        view_switch = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        view_switch.set_name("group-tabs")
+        self._switching_view = False
+        self.view_home_btn = self._make_tab_button("Home", "home", self._on_view_toggled, active=True)
+        self.view_editor_btn = self._make_tab_button("Editor", "detail", self._on_view_toggled)
+        view_switch.pack_start(self.view_home_btn, False, False, 0)
+        view_switch.pack_start(self.view_editor_btn, False, False, 0)
+        hb.set_custom_title(view_switch)
+
+    def _build_all_page(self):
         # -- All page --
         all_page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
 
@@ -680,8 +726,9 @@ class ManagerWindow(Gtk.ApplicationWindow):
         scroll.add(self.listbox)
         all_page.pack_start(scroll, True, True, 0)
 
-        self.sidebar_stack.add_named(all_page, "all")
+        return all_page
 
+    def _build_groups_page(self):
         # -- Groups page --
         groups_page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
 
@@ -782,12 +829,9 @@ class ManagerWindow(Gtk.ApplicationWindow):
         groups_scroll.add(self.groups_listbox)
         groups_page.pack_start(groups_scroll, True, True, 0)
 
-        self.sidebar_stack.add_named(groups_page, "groups")
+        return groups_page
 
-        left_box.pack_start(self.sidebar_stack, True, True, 0)
-
-        hpaned.pack1(left_box, False, False)
-
+    def _build_right_stack(self):
         # -- Right: form stack (script / group) --
         self.right_stack = Gtk.Stack()
         self.right_stack.set_transition_type(Gtk.StackTransitionType.CROSSFADE)
@@ -816,39 +860,7 @@ class ManagerWindow(Gtk.ApplicationWindow):
         self.group_form.set_sensitive(False)
         self.right_stack.add_named(self.group_form, "group")
 
-        hpaned.pack2(self.right_stack, True, False)
-
-        # Register the two top-level screens; open on Home.
-        self.outer_stack.add_named(self._build_home_screen(), "home")
-        self.outer_stack.add_named(hpaned, "detail")
-        self.outer_stack.set_visible_child_name("home")
-        self.outer_stack.connect("notify::visible-child", self._on_view_changed)
-
-        ScriptRow._on_run = self._run_script
-        ScriptRow._on_stop = self._stop_single_script
-        ScriptRow._on_restart = self._restart_script
-        ScriptRow._on_select_script_settings = self._open_script_settings
-        ScriptRow._on_select_script_logs = self._open_script_logs
-        ScriptRow._on_select_script_envs = self._open_script_envs
-        ScriptRow._on_open_terminal = self._open_terminal
-        self._load_list()
-        # Ctrl+F accelerator (works globally, even when focus is on an entry)
-        accel = Gtk.AccelGroup()
-        accel.connect(Gdk.KEY_f, Gdk.ModifierType.CONTROL_MASK, 0,
-                      lambda *_: self._toggle_log_search() or True)
-        self.add_accel_group(accel)
-        self.show_all()
-        # Select first script if available
-        first = self.listbox.get_row_at_index(0)
-        if first:
-            self.listbox.select_row(first)
-        else:
-            self.form.clear()
-
-        # Auto-refresh logs tab + detect state changes for badges
-        self._last_error_state = get_error_states()
-        self._last_running_state = get_running_ids()
-        GLib.timeout_add_seconds(2, self._refresh_logs_tab)
+        return self.right_stack
 
     def _toggle_log_search(self):
         if self.right_stack.get_visible_child_name() == "script":
