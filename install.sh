@@ -104,13 +104,10 @@ echo "==> Copying files to $INSTALL_DIR..."
 mkdir -p "$INSTALL_DIR" "$BIN_DIR" "$CONFIG_DIR"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cp "$SCRIPT_DIR/lazylauncher.py" "$INSTALL_DIR/"
-cp "$SCRIPT_DIR/common.py"      "$INSTALL_DIR/"
-cp "$SCRIPT_DIR/deps.py"        "$INSTALL_DIR/"
-cp "$SCRIPT_DIR/ansi.py"        "$INSTALL_DIR/"
-cp "$SCRIPT_DIR/log_view.py"    "$INSTALL_DIR/"
-cp "$SCRIPT_DIR/tray.py"        "$INSTALL_DIR/"
-cp "$SCRIPT_DIR/manager.py"     "$INSTALL_DIR/"
+# Copy every top-level app module. Using a glob (not a hand-maintained list)
+# means new modules — runner, sorting, the componentized UI widgets, etc. —
+# are installed automatically instead of leaving the app with a missing import.
+cp "$SCRIPT_DIR/"*.py "$INSTALL_DIR/"
 mkdir -p "$INSTALL_DIR/icons"
 cp "$SCRIPT_DIR/icons/"*.png "$INSTALL_DIR/icons/" 2>/dev/null || true
 cp "$SCRIPT_DIR/icons/"*.svg "$INSTALL_DIR/icons/" 2>/dev/null || true
