@@ -21,7 +21,7 @@ from pathlib import Path
 from common import (
     CONFIG_DIR, CONFIG_FILE, ICON_DIR, LOG_DIR,
     RUN_STATE_FILE, ERROR_STATE_FILE,
-    _safe_write, config_lock, load_config, save_config,
+    _safe_write, config_lock, run_state_lock, load_config, save_config,
     get_error_states, get_running_ids,
     _get_pid_start_time, _is_pid_alive, _mark_stopped,
     find_script_pid, rotate_log, log_path,
@@ -417,13 +417,20 @@ def kill_port(port: int) -> bool:
 def _mark_running(script_id: str, pid: int):
     if not script_id:
         return
+    # Refuse to track an invalid PID. A failed terminal launch used to mark
+    # pid 0, which os.kill(0, 0) reports as "alive" forever — a phantom that
+    # could never be cleared. Better to not track than to track a lie.
+    if not pid or pid <= 0:
+        get_logger().warning("Not tracking %s: no valid PID captured", script_id)
+        return
     try:
-        state = {}
-        if RUN_STATE_FILE.exists():
-            with open(RUN_STATE_FILE) as f:
-                state = json.load(f)
-        state[script_id] = {"pid": pid, "start_time": _get_pid_start_time(pid)}
-        _safe_write(RUN_STATE_FILE, json.dumps(state))
+        with run_state_lock():
+            state = {}
+            if RUN_STATE_FILE.exists():
+                with open(RUN_STATE_FILE) as f:
+                    state = json.load(f)
+            state[script_id] = {"pid": pid, "start_time": _get_pid_start_time(pid)}
+            _safe_write(RUN_STATE_FILE, json.dumps(state))
     except Exception:
         pass
     # Auto-detect port if not configured
@@ -437,11 +444,25 @@ def _mark_running(script_id: str, pid: int):
 
 
 def _stop_script(script_id: str):
-    """Terminate a tracked script by its process group, then mark it stopped."""
+    """Terminate a tracked script by its process group, then mark it stopped.
+
+    Escalates SIGTERM -> SIGKILL after a short grace period so a process that
+    traps or ignores SIGTERM still dies, matching the manager's stop_script.
+    """
     pid = find_script_pid(script_id)
     if pid:
-        _kill_safe(os.killpg, os.getpgid(pid), signal.SIGTERM)
+        try:
+            pgid = os.getpgid(pid)
+        except OSError:
+            pgid = None
+        if pgid is not None:
+            _kill_safe(os.killpg, pgid, signal.SIGTERM)
         _kill_safe(os.kill, pid, signal.SIGTERM)
+        time.sleep(0.5)
+        if _is_pid_alive(pid):
+            if pgid is not None:
+                _kill_safe(os.killpg, pgid, signal.SIGKILL)
+            _kill_safe(os.kill, pid, signal.SIGKILL)
     _mark_stopped(script_id)
 
 

@@ -86,6 +86,77 @@ def test_config_lock_acquire_release(tmp_path, monkeypatch):
         pass
 
 
+# -- _is_pid_alive (phantom guard) --------------------------------------------
+
+def test_is_pid_alive_rejects_zero():
+    # os.kill(0, 0) signals our own process group and would lie "alive".
+    assert common._is_pid_alive(0) is False
+    assert common._is_pid_alive(-1) is False
+
+
+def test_is_pid_alive_self_is_true():
+    assert common._is_pid_alive(os.getpid()) is True
+
+
+def test_get_running_ids_prunes_invalid_pid(tmp_path, monkeypatch):
+    rs = tmp_path / "run_state.json"
+    monkeypatch.setattr(common, "STATE_DIR", tmp_path)
+    monkeypatch.setattr(common, "RUN_STATE_FILE", rs)
+    monkeypatch.setattr(common, "RUN_LOCK_FILE", tmp_path / ".run.lock")
+    # A phantom pid-0 entry and a real one (our own pid).
+    rs.write_text('{"ghost": {"pid": 0, "start_time": ""}, '
+                  f'"real": {{"pid": {os.getpid()}, "start_time": ""}}}}')
+    assert common.get_running_ids() == {"real"}
+    # The phantom was pruned from disk too.
+    import json
+    assert "ghost" not in json.loads(rs.read_text())
+
+
+# -- load_config / save_config corruption safety ------------------------------
+
+def test_load_config_missing_returns_seed(tmp_path, monkeypatch):
+    monkeypatch.setattr(common, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(common, "CONFIG_FILE", tmp_path / "cfg.json")
+    monkeypatch.setattr(common, "CONFIG_BAK", tmp_path / "cfg.json.bak")
+    assert common.load_config() == {"scripts": [], "groups": []}
+
+
+def test_save_config_keeps_backup(tmp_path, monkeypatch):
+    cfg = tmp_path / "cfg.json"
+    bak = tmp_path / "cfg.json.bak"
+    monkeypatch.setattr(common, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(common, "CONFIG_FILE", cfg)
+    monkeypatch.setattr(common, "CONFIG_BAK", bak)
+    common.save_config({"scripts": [{"id": "a"}], "groups": []})
+    common.save_config({"scripts": [{"id": "b"}], "groups": []})
+    import json
+    assert json.loads(bak.read_text())["scripts"][0]["id"] == "a"
+    assert json.loads(cfg.read_text())["scripts"][0]["id"] == "b"
+
+
+def test_load_config_corrupt_preserves_and_recovers_from_bak(tmp_path, monkeypatch):
+    cfg = tmp_path / "cfg.json"
+    bak = tmp_path / "cfg.json.bak"
+    monkeypatch.setattr(common, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(common, "CONFIG_FILE", cfg)
+    monkeypatch.setattr(common, "CONFIG_BAK", bak)
+    bak.write_text('{"scripts": [{"id": "good"}], "groups": []}')
+    cfg.write_text("{ this is not json")
+    recovered = common.load_config()
+    assert recovered["scripts"][0]["id"] == "good"
+    # Corrupt file was preserved aside, not silently discarded.
+    assert list(tmp_path.glob(".lazylauncher-config.corrupt-*.json")) != []
+
+
+def test_run_state_lock_acquire_release(tmp_path, monkeypatch):
+    monkeypatch.setattr(common, "STATE_DIR", tmp_path)
+    monkeypatch.setattr(common, "RUN_LOCK_FILE", tmp_path / ".run.lock")
+    with common.run_state_lock():
+        pass
+    with common.run_state_lock():
+        pass
+
+
 # -- ensure_seed_config -------------------------------------------------------
 
 def test_seed_only_when_absent(tmp_path, monkeypatch):

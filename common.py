@@ -8,6 +8,7 @@ import fcntl
 import json
 import logging
 import os
+import shutil
 import tempfile
 import time
 from contextlib import contextmanager
@@ -19,6 +20,7 @@ VERSION = "1.0.0"
 # Config (durable, user-editable, safe to sync/export) lives under XDG_CONFIG_HOME.
 CONFIG_DIR  = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "lazylauncher"
 CONFIG_FILE = CONFIG_DIR / ".lazylauncher-config.json"
+CONFIG_BAK  = CONFIG_DIR / ".lazylauncher-config.json.bak"
 ICON_DIR    = CONFIG_DIR / "icons"
 LOCK_FILE   = CONFIG_DIR / ".lazylauncher.lock"
 
@@ -29,6 +31,7 @@ LOG_DIR          = STATE_DIR / "logs"
 RUN_STATE_FILE   = STATE_DIR / "run_state.json"
 ERROR_STATE_FILE = STATE_DIR / "error_state.json"
 APP_LOG_FILE     = STATE_DIR / "lazylauncher.log"
+RUN_LOCK_FILE    = STATE_DIR / ".run_state.lock"
 
 MAX_LOG_SIZE   = 1024 * 1024        # 1 MB per log file
 MAX_LOG_AGE    = 30 * 24 * 60 * 60  # 30 days in seconds
@@ -116,6 +119,30 @@ def config_lock():
         f.close()
 
 
+@contextmanager
+def run_state_lock():
+    """Serialize read-modify-write of run_state.json across tray and manager.
+
+    The run state is touched from several places that all do a load → mutate →
+    save cycle: the tray marking scripts running/stopped, ``get_running_ids``
+    pruning dead PIDs, and the manager's stop path. ``_safe_write`` makes each
+    individual write atomic, but the read-modify-write *as a whole* is not, so
+    concurrent writers used to clobber each other (a freshly started script
+    could vanish from tracking). This lock closes that race.
+
+    It uses a dedicated lock file (not ``config_lock``) so run-state updates and
+    config writes can never deadlock against each other.
+    """
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    f = open(RUN_LOCK_FILE, "w")
+    try:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(f, fcntl.LOCK_UN)
+        f.close()
+
+
 def normalize_env_vars(raw) -> list:
     """Return env vars as a list of ``{"key": str, "value": str}`` dicts.
 
@@ -144,17 +171,45 @@ def normalize_env_vars(raw) -> list:
 
 
 def load_config() -> dict:
-    if CONFIG_FILE.exists():
+    """Load the config, never silently destroying user data on corruption.
+
+    A missing file is a normal first run. But a file that *exists* yet fails to
+    parse must not be treated as "empty" — the next ``save_config`` would
+    overwrite the (possibly recoverable) data. Instead we preserve the corrupt
+    file aside, fall back to the last-good ``.bak``, and only then give up to a
+    fresh seed.
+    """
+    if not CONFIG_FILE.exists():
+        return {"scripts": [], "groups": []}
+    try:
+        with open(CONFIG_FILE) as f:
+            return json.load(f)
+    except Exception:
+        # Preserve the corrupt file for manual recovery instead of clobbering it.
         try:
-            with open(CONFIG_FILE) as f:
-                return json.load(f)
-        except Exception:
+            corrupt = CONFIG_DIR / f".lazylauncher-config.corrupt-{int(time.time())}.json"
+            shutil.copy2(str(CONFIG_FILE), str(corrupt))
+            get_logger().error("Config unreadable; preserved copy at %s", corrupt)
+        except OSError:
             pass
+        if CONFIG_BAK.exists():
+            try:
+                with open(CONFIG_BAK) as f:
+                    return json.load(f)
+            except Exception:
+                pass
     return {"scripts": [], "groups": []}
 
 
 def save_config(cfg: dict):
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    # Keep the previous good copy as a backup before overwriting, so a bad write
+    # or a later corruption can be recovered from .bak.
+    if CONFIG_FILE.exists():
+        try:
+            shutil.copy2(str(CONFIG_FILE), str(CONFIG_BAK))
+        except OSError:
+            pass
     _safe_write(CONFIG_FILE, json.dumps(cfg, indent=2))
 
 
@@ -230,6 +285,10 @@ def _get_pid_start_time(pid: int) -> str:
 
 
 def _is_pid_alive(pid: int, start_time: str = "") -> bool:
+    # pid <= 0 is never a real tracked process: os.kill(0, 0) would target our
+    # own process group and falsely report "alive", creating phantom entries.
+    if pid <= 0:
+        return False
     try:
         os.kill(pid, 0)
     except OSError:
@@ -243,12 +302,13 @@ def _mark_stopped(script_id: str):
     if not script_id:
         return
     try:
-        if not RUN_STATE_FILE.exists():
-            return
-        with open(RUN_STATE_FILE) as f:
-            state = json.load(f)
-        state.pop(script_id, None)
-        _safe_write(RUN_STATE_FILE, json.dumps(state))
+        with run_state_lock():
+            if not RUN_STATE_FILE.exists():
+                return
+            with open(RUN_STATE_FILE) as f:
+                state = json.load(f)
+            state.pop(script_id, None)
+            _safe_write(RUN_STATE_FILE, json.dumps(state))
     except Exception:
         pass
 
@@ -258,21 +318,22 @@ def get_running_ids() -> set:
     tracked = set()
     if RUN_STATE_FILE.exists():
         try:
-            with open(RUN_STATE_FILE) as f:
-                state = json.load(f)
-            alive = {}
-            for sid, entry in state.items():
-                if isinstance(entry, dict):
-                    pid = entry.get("pid", 0)
-                    start_time = entry.get("start_time", "")
-                else:
-                    pid = entry
-                    start_time = ""
-                if _is_pid_alive(pid, start_time):
-                    alive[sid] = entry
-                    tracked.add(sid)
-            if len(alive) != len(state):
-                _safe_write(RUN_STATE_FILE, json.dumps(alive))
+            with run_state_lock():
+                with open(RUN_STATE_FILE) as f:
+                    state = json.load(f)
+                alive = {}
+                for sid, entry in state.items():
+                    if isinstance(entry, dict):
+                        pid = entry.get("pid", 0)
+                        start_time = entry.get("start_time", "")
+                    else:
+                        pid = entry
+                        start_time = ""
+                    if _is_pid_alive(pid, start_time):
+                        alive[sid] = entry
+                        tracked.add(sid)
+                if len(alive) != len(state):
+                    _safe_write(RUN_STATE_FILE, json.dumps(alive))
         except Exception:
             pass
     return tracked
