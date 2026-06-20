@@ -27,6 +27,17 @@ _TIP_RUNNING_FIRST = "Running first"
 _TIP_STOPPED_FIRST = "Stopped first"
 
 
+def make_tab_button(label, mode, on_toggled, active=False):
+    """Build a styled segmented toggle button (the Home/Editor and Scripts/Groups
+    switchers share this look)."""
+    btn = Gtk.ToggleButton(label=label)
+    btn.set_mode(False)
+    btn.get_style_context().add_class("group-tab")
+    btn.set_active(active)
+    btn.connect("toggled", lambda b: on_toggled(b, mode))
+    return btn
+
+
 def new_script() -> dict:
     return {
         "id":          str(uuid.uuid4())[:8],

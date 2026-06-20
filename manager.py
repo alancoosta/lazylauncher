@@ -23,21 +23,22 @@ from common import (
     migrate_state, ensure_seed_config,
 )
 from deps import run_group_ordered
-from sorting import port_sort_key, sort_scripts
+from sorting import sort_scripts
 import ansi
 import config_io
 
 import gi
 gi.require_version("Gtk", "3.0")
-from gi.repository import Gtk, Gdk, Pango, GLib
+from gi.repository import Gtk, Gdk, GLib
 
 from ui_shared import (
     _STOP_LABEL,
     _TIP_SORT_NAME_AZ, _TIP_SORT_NAME_ZA,
     _TIP_RUNNING_FIRST, _TIP_STOPPED_FIRST,
-    _is_dark_theme, new_script, new_group,
+    _is_dark_theme, new_script, new_group, make_tab_button,
 )
 from rows import ScriptRow, GroupRow
+from home_view import HomeView
 from script_form import ScriptForm
 from group_form import GroupForm
 
@@ -550,7 +551,19 @@ class ManagerWindow(Gtk.ApplicationWindow):
         hpaned.pack2(self._build_right_stack(), True, False)
 
         # Register the two top-level screens; open on Home.
-        self.outer_stack.add_named(self._build_home_screen(), "home")
+        self.home_view = HomeView(
+            on_open_script=self._home_open_script,
+            on_open_group=self._home_open_group,
+            on_new_script=self._new_script,
+            on_new_group=self._new_group_and_select,
+            on_run_script=self._home_run_script,
+            on_stop_script=self._home_stop_script,
+            on_run_group=self._home_run_group,
+            on_stop_group=self._home_stop_group,
+            on_edit_script=self._home_edit_script,
+            on_edit_group_name=self._home_edit_group_name,
+        )
+        self.outer_stack.add_named(self.home_view, "home")
         self.outer_stack.add_named(hpaned, "detail")
         self.outer_stack.set_visible_child_name("home")
         self.outer_stack.connect("notify::visible-child", self._on_view_changed)
@@ -616,8 +629,8 @@ class ManagerWindow(Gtk.ApplicationWindow):
         view_switch = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
         view_switch.set_name("group-tabs")
         self._switching_view = False
-        self.view_home_btn = self._make_tab_button("Home", "home", self._on_view_toggled, active=True)
-        self.view_editor_btn = self._make_tab_button("Editor", "detail", self._on_view_toggled)
+        self.view_home_btn = make_tab_button("Home", "home", self._on_view_toggled, active=True)
+        self.view_editor_btn = make_tab_button("Editor", "detail", self._on_view_toggled)
         view_switch.pack_start(self.view_home_btn, False, False, 0)
         view_switch.pack_start(self.view_editor_btn, False, False, 0)
         hb.set_custom_title(view_switch)
@@ -962,7 +975,7 @@ class ManagerWindow(Gtk.ApplicationWindow):
                 self.right_stack.set_visible_child_name("script")
 
     def _rebuild_groups_view(self):
-        self._reload_home_groups()
+        self.home_view.reload_groups()
         for child in self.groups_listbox.get_children():
             self.groups_listbox.remove(child)
 
@@ -1304,262 +1317,7 @@ class ManagerWindow(Gtk.ApplicationWindow):
         if self._sidebar_mode == "groups":
             self._rebuild_groups_view()
 
-    # -- Home table -------------------------------------------------------------
-
-    # ListStore column indices: id is hidden, the rest map to script fields.
-    _HOME_COL_ID, _HOME_COL_NAME, _HOME_COL_PORT, _HOME_COL_CMD, _HOME_COL_WD = range(5)
-    _HOME_FIELDS = {
-        _HOME_COL_NAME: "name",
-        _HOME_COL_PORT: "port",
-        _HOME_COL_CMD: "command",
-        _HOME_COL_WD: "working_dir",
-    }
-
-    # Group table is a tree: each group row holds its scripts as child rows.
-    # kind distinguishes "group" vs "script"; child rows mirror the scripts
-    # table columns (name / port / command / working dir). Group rows only
-    # use the name column.
-    (_HOME_G_COL_ID, _HOME_G_COL_KIND, _HOME_G_COL_NAME,
-     _HOME_G_COL_PORT, _HOME_G_COL_CMD, _HOME_G_COL_WD) = range(6)
-    _HOME_G_FIELDS = {
-        _HOME_G_COL_NAME: "name",
-        _HOME_G_COL_PORT: "port",
-        _HOME_G_COL_CMD: "command",
-        _HOME_G_COL_WD: "working_dir",
-    }
-
-    # Per-row action icons shared by both home tables (title, icon, key).
-    _HOME_ACTIONS = [
-        ("Run", "media-playback-start-symbolic", "run"),
-        ("Stop", "media-playback-stop-symbolic", "stop"),
-        ("Settings", "emblem-system-symbolic", "settings"),
-        ("Logs", "text-x-generic-symbolic", "logs"),
-        ("Env", "dialog-password-symbolic", "envs"),
-    ]
-
-    @staticmethod
-    def _make_tab_button(label, mode, on_toggled, active=False):
-        """Build a styled segmented toggle button (Home/Editor + Scripts/Groups
-        switchers share this look)."""
-        btn = Gtk.ToggleButton(label=label)
-        btn.set_mode(False)
-        btn.get_style_context().add_class("group-tab")
-        btn.set_active(active)
-        btn.connect("toggled", lambda b: on_toggled(b, mode))
-        return btn
-
-    def _build_home_screen(self):
-        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        page.get_style_context().add_class("home-table")
-
-        # Sub-tabs: Scripts | Groups (same pattern as the editor sidebar)
-        self._home_mode = "scripts"
-        self._switching_home_tab = False
-        tab_bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
-        tab_bar.set_name("group-tabs")
-        tab_bar.set_margin_start(8)
-        tab_bar.set_margin_end(8)
-        tab_bar.set_margin_top(8)
-        self.home_scripts_tab = self._make_tab_button(
-            "Scripts", "scripts", self._on_home_tab_toggled, active=True)
-        self.home_groups_tab = self._make_tab_button(
-            "Groups", "groups", self._on_home_tab_toggled)
-        tab_bar.pack_start(self.home_scripts_tab, True, True, 0)
-        tab_bar.pack_start(self.home_groups_tab, True, True, 0)
-        page.pack_start(tab_bar, False, False, 0)
-
-        self.home_inner_stack = Gtk.Stack()
-        self.home_inner_stack.set_transition_type(Gtk.StackTransitionType.SLIDE_LEFT_RIGHT)
-        self.home_inner_stack.set_transition_duration(150)
-        self.home_inner_stack.add_named(self._build_home_scripts_page(), "scripts")
-        self.home_inner_stack.add_named(self._build_home_groups_page(), "groups")
-        page.pack_start(self.home_inner_stack, True, True, 0)
-        return page
-
-    def _build_home_toolbar(self, new_label, new_cb, placeholder, search_cb):
-        """Build the shared '+ New …' button + filter entry toolbar.
-        Returns (toolbar, search_entry)."""
-        toolbar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        toolbar.set_name("list-toolbar")
-        toolbar.set_margin_start(8)
-        toolbar.set_margin_end(8)
-        toolbar.set_margin_top(8)
-        toolbar.set_margin_bottom(6)
-
-        new_btn = Gtk.Button(label=new_label)
-        new_btn.get_style_context().add_class("btn-primary")
-        new_btn.connect("clicked", new_cb)
-        toolbar.pack_start(new_btn, False, False, 0)
-
-        search = Gtk.SearchEntry()
-        search.get_style_context().add_class("form-entry")
-        search.set_placeholder_text(placeholder)
-        search.set_hexpand(True)
-        search.connect("search-changed", search_cb)
-        toolbar.pack_start(search, True, True, 0)
-        return toolbar, search
-
-    def _add_text_columns(self, tree, columns, on_edited):
-        """Append editable, ellipsized text columns from (title, col, width,
-        expand) specs to a home table; wires sorting and the edit callback."""
-        for title, col, width, expand in columns:
-            renderer = Gtk.CellRendererText()
-            renderer.set_property("editable", True)
-            renderer.set_property("ellipsize", Pango.EllipsizeMode.END)
-            renderer.set_padding(6, 1)
-            renderer.connect("edited", on_edited, col)
-            column = Gtk.TreeViewColumn(title, renderer, text=col)
-            column.set_resizable(True)
-            column.set_sort_column_id(col)
-            column.set_expand(expand)
-            column.set_min_width(width if not expand else 160)
-            if not expand:
-                column.set_fixed_width(width)
-            tree.append_column(column)
-
-    def _add_action_columns(self, tree, on_click):
-        """Append the shared per-row action icon columns to a home table and
-        wire its button-press handler. Returns the {column: key} map."""
-        action_columns = {}
-        for title, icon, key in self._HOME_ACTIONS:
-            action_columns[self._append_action_column(tree, title, icon)] = key
-        tree.connect("button-press-event", on_click)
-        return action_columns
-
-    def _set_port_sort(self, store, col):
-        """Sort a home table's port column numerically (blank/non-numeric = 0)."""
-        store.set_sort_func(
-            col,
-            lambda m, a, b, _: port_sort_key(m[a][col]) - port_sort_key(m[b][col]),
-        )
-
-    def _build_home_scripts_page(self):
-        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-
-        toolbar, self.home_search_entry = self._build_home_toolbar(
-            "+ New Script", self._new_script, "Filter scripts…", self._reload_home_table)
-        page.pack_start(toolbar, False, False, 0)
-
-        self.home_store = Gtk.ListStore(str, str, str, str, str)
-        self._set_port_sort(self.home_store, self._HOME_COL_PORT)
-
-        self.home_tree = Gtk.TreeView(model=self.home_store)
-        self.home_tree.set_enable_search(False)
-        self._add_text_columns(self.home_tree, [
-            ("Name", self._HOME_COL_NAME, 220, False),
-            ("Port", self._HOME_COL_PORT, 70, False),
-            ("Command", self._HOME_COL_CMD, 320, True),
-            ("Working directory", self._HOME_COL_WD, 280, True),
-        ], self._home_cell_edited)
-        # Per-row action icons — discoverable access to a script's config.
-        self._home_action_columns = self._add_action_columns(
-            self.home_tree, self._home_tree_button_press)
-
-        scroll = Gtk.ScrolledWindow()
-        scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
-        scroll.set_vexpand(True)
-        scroll.add(self.home_tree)
-        page.pack_start(scroll, True, True, 0)
-        return page
-
-    def _append_action_column(self, tree, title, icon_name):
-        """Add a fixed-width clickable icon column to a home table."""
-        renderer = Gtk.CellRendererPixbuf()
-        renderer.set_property("icon-name", icon_name)
-        renderer.set_alignment(0.5, 0.5)
-        renderer.set_padding(6, 1)
-        column = Gtk.TreeViewColumn(title, renderer)
-        column.set_alignment(0.5)
-        column.set_resizable(False)
-        column.set_min_width(56)
-        column.set_fixed_width(64)
-        tree.append_column(column)
-        return column
-
-    def _build_home_groups_page(self):
-        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-
-        toolbar, self.home_groups_search_entry = self._build_home_toolbar(
-            "+ New Group", lambda _: self._new_group_and_select(),
-            "Filter groups…", self._reload_home_groups)
-        page.pack_start(toolbar, False, False, 0)
-
-        # TreeStore: group parent rows + script child rows, mirroring the
-        # scripts table columns (id, kind, name, port, command, working dir).
-        self.home_groups_store = Gtk.TreeStore(str, str, str, str, str, str)
-        self._set_port_sort(self.home_groups_store, self._HOME_G_COL_PORT)
-
-        self.home_groups_tree = Gtk.TreeView(model=self.home_groups_store)
-        self.home_groups_tree.set_enable_search(False)
-        self.home_groups_tree.set_enable_tree_lines(True)
-        self._add_text_columns(self.home_groups_tree, [
-            ("Name", self._HOME_G_COL_NAME, 300, False),
-            ("Port", self._HOME_G_COL_PORT, 70, False),
-            ("Command", self._HOME_G_COL_CMD, 320, True),
-            ("Working directory", self._HOME_G_COL_WD, 280, True),
-        ], self._home_group_cell_edited)
-        # Same action set as the scripts table; on group rows run/stop/settings
-        # act on the whole group while logs/env are no-ops.
-        self._home_group_action_columns = self._add_action_columns(
-            self.home_groups_tree, self._home_groups_tree_button_press)
-
-        scroll = Gtk.ScrolledWindow()
-        scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
-        scroll.set_vexpand(True)
-        scroll.add(self.home_groups_tree)
-        page.pack_start(scroll, True, True, 0)
-        return page
-
-    def _on_home_tab_toggled(self, button, mode):
-        if self._switching_home_tab or not button.get_active():
-            return
-        self._switching_home_tab = True
-        self.home_scripts_tab.set_active(mode == "scripts")
-        self.home_groups_tab.set_active(mode == "groups")
-        self._switching_home_tab = False
-        self._home_mode = mode
-        self.home_inner_stack.set_visible_child_name(mode)
-        if mode == "groups":
-            self._reload_home_groups()
-        else:
-            self._reload_home_table()
-
-    @staticmethod
-    def _is_valid_port(value):
-        """A port field edit is accepted only if empty or all digits."""
-        return not value or value.isdigit()
-
-    @staticmethod
-    def _query_matches_script(query, script):
-        """True if a lowercased filter query matches a script's name or command."""
-        return query in (script.get("name", "") + " " + script.get("command", "")).lower()
-
-    def _query_matches_group(self, query, group, members):
-        """True if the query matches a group's name/description or any member script."""
-        hay = (group.get("name", "") + " " + group.get("description", "")).lower()
-        return query in hay or any(self._query_matches_script(query, s) for s in members)
-
-    def _reload_home_groups(self, *_):
-        if not hasattr(self, "home_groups_store"):
-            return
-        query = self.home_groups_search_entry.get_text().lower()
-        cfg = load_config()
-        scripts = cfg.get("scripts", [])
-        self.home_groups_store.clear()
-        for g in cfg.get("groups", []):
-            gid = g.get("id", "")
-            members = [s for s in scripts if gid in s.get("groups", [])]
-            if query and not self._query_matches_group(query, g, members):
-                continue
-            parent = self.home_groups_store.append(None, [
-                gid, "group", g.get("name", ""), "", "", "",
-            ])
-            for s in members:
-                self.home_groups_store.append(parent, [
-                    s.get("id", ""), "script", s.get("name", ""),
-                    s.get("port", ""), s.get("command", ""), s.get("working_dir", ""),
-                ])
-        self.home_groups_tree.expand_all()
+    # -- Home table bridge (HomeView delegates navigation + persistence here) ----
 
     def _find_script(self, script_id):
         return next((s for s in load_config().get("scripts", [])
@@ -1568,13 +1326,6 @@ class ManagerWindow(Gtk.ApplicationWindow):
     def _find_group(self, group_id):
         return next((g for g in load_config().get("groups", [])
                      if g.get("id") == group_id), None)
-
-    def _reload_home_active(self, *_):
-        """Reload only the currently visible home sub-table."""
-        if getattr(self, "_home_mode", "scripts") == "groups":
-            self._reload_home_groups()
-        else:
-            self._reload_home_table()
 
     def _update_config_item(self, key, item_id, field, value):
         """Set a field on a script/group by id; return the updated dict or None."""
@@ -1588,115 +1339,6 @@ class ManagerWindow(Gtk.ApplicationWindow):
                     break
             save_config(cfg)
         return updated
-
-    def _home_group_cell_edited(self, _renderer, path, new_text, col):
-        new_text = new_text.strip()
-        row = self.home_groups_store[path]
-        obj_id = row[self._HOME_G_COL_ID]
-        if row[self._HOME_G_COL_KIND] == "group":
-            # Group rows only carry a name; ignore edits on the script columns.
-            if col != self._HOME_G_COL_NAME or not new_text:
-                return
-            updated = self._update_config_item("groups", obj_id, "name", new_text)
-            if updated is None:
-                return
-            row[col] = new_text
-            # Keep the editor side in sync (sidebar rows + checkboxes + open form).
-            self._rebuild_groups_view()
-            self.form._rebuild_group_checkboxes()
-            if self.group_form._group and self.group_form._group.get("id") == obj_id:
-                self.group_form.load_group(updated)
-        else:  # script child row — same fields as the scripts table
-            field = self._HOME_G_FIELDS[col]
-            if field == "name" and not new_text:
-                return
-            if field == "port" and not self._is_valid_port(new_text):
-                return  # ports are numeric; ignore invalid edits
-            updated = self._update_config_item("scripts", obj_id, field, new_text)
-            if updated is None:
-                return
-            row[col] = new_text
-            self._load_list()  # refresh sidebar + scripts table + group tree
-            if self.form._script and self.form._script.get("id") == obj_id:
-                self.form.load_script(updated)
-
-    def _home_open_group(self, group_id):
-        group = self._find_group(group_id)
-        if not group:
-            return
-        self.outer_stack.set_visible_child_name("detail")
-        self._switch_tab("groups")
-        for row in self.groups_listbox.get_children():
-            if isinstance(row, GroupRow) and row.group.get("id") == group_id:
-                self.groups_listbox.select_row(row)
-                break
-        self._select_group(group)
-
-    def _home_group_action(self, key, group_id):
-        # run/stop/settings act on the whole group; logs/env are n/a for groups.
-        if key == "settings":
-            self._home_open_group(group_id)
-        elif key in ("run", "stop"):
-            group = self._find_group(group_id)
-            if group:
-                (self._run_group if key == "run" else self._stop_group)(group)
-
-    @staticmethod
-    def _action_column_hit(tree, event, action_columns):
-        """Hit-test a left-click on an icon column. Returns (key, path) for the
-        clicked action, or (None, None) when the click isn't on one."""
-        if event.button != 1:
-            return None, None
-        info = tree.get_path_at_pos(int(event.x), int(event.y))
-        if not info:
-            return None, None
-        path, column, _, _ = info
-        return action_columns.get(column), path
-
-    def _home_groups_tree_button_press(self, tree, event):
-        key, path = self._action_column_hit(tree, event, self._home_group_action_columns)
-        if not key:
-            return False
-        row = self.home_groups_store[path]
-        obj_id = row[self._HOME_G_COL_ID]
-        if row[self._HOME_G_COL_KIND] == "script":
-            self._home_script_action(key, obj_id)
-        else:
-            self._home_group_action(key, obj_id)
-        return True
-
-    def _reload_home_table(self, *_):
-        if not hasattr(self, "home_store"):
-            return
-        query = self.home_search_entry.get_text().lower()
-        self.home_store.clear()
-        for s in load_config().get("scripts", []):
-            if query and not self._query_matches_script(query, s):
-                continue
-            self.home_store.append([
-                s.get("id", ""),
-                s.get("name", ""),
-                s.get("port", ""),
-                s.get("command", ""),
-                s.get("working_dir", ""),
-            ])
-
-    def _home_cell_edited(self, _renderer, path, new_text, col):
-        field = self._HOME_FIELDS.get(col)
-        if field is None:
-            return
-        new_text = new_text.strip()
-        if field == "port" and not self._is_valid_port(new_text):
-            return  # ports are numeric; ignore invalid edits
-        script_id = self.home_store[path][self._HOME_COL_ID]
-        updated = self._update_config_item("scripts", script_id, field, new_text)
-        if updated is None:
-            return
-        self.home_store[path][col] = new_text
-        # Keep the editor side in sync (sidebar rows + open form).
-        self._load_list()
-        if self.form._script and self.form._script.get("id") == script_id:
-            self.form.load_script(updated)
 
     def _home_open_script(self, script_id, page=0):
         """Open a script in the editor at the given notebook page (0=Settings,
@@ -1715,20 +1357,58 @@ class ManagerWindow(Gtk.ApplicationWindow):
         self.right_stack.set_visible_child_name("script")
         self.outer_stack.set_visible_child_name("detail")
 
-    def _home_tree_button_press(self, tree, event):
-        key, path = self._action_column_hit(tree, event, self._home_action_columns)
-        if not key:
-            return False
-        self._home_script_action(key, self.home_store[path][self._HOME_COL_ID])
-        return True
+    def _home_open_group(self, group_id):
+        group = self._find_group(group_id)
+        if not group:
+            return
+        self.outer_stack.set_visible_child_name("detail")
+        self._switch_tab("groups")
+        for row in self.groups_listbox.get_children():
+            if isinstance(row, GroupRow) and row.group.get("id") == group_id:
+                self.groups_listbox.select_row(row)
+                break
+        self._select_group(group)
 
-    def _home_script_action(self, key, script_id):
-        if key in ("run", "stop"):
-            script = self._find_script(script_id)
-            if script:
-                (self._run_script if key == "run" else self._stop_single_script)(script)
-        else:
-            self._home_open_script(script_id, {"settings": 0, "logs": 1, "envs": 2}[key])
+    def _home_run_script(self, script_id):
+        script = self._find_script(script_id)
+        if script:
+            self._run_script(script)
+
+    def _home_stop_script(self, script_id):
+        script = self._find_script(script_id)
+        if script:
+            self._stop_single_script(script)
+
+    def _home_run_group(self, group_id):
+        group = self._find_group(group_id)
+        if group:
+            self._run_group(group)
+
+    def _home_stop_group(self, group_id):
+        group = self._find_group(group_id)
+        if group:
+            self._stop_group(group)
+
+    def _home_edit_script(self, script_id, field, value):
+        """Persist an inline scripts-table edit and resync the editor side."""
+        updated = self._update_config_item("scripts", script_id, field, value)
+        if updated is None:
+            return None
+        self._load_list()
+        if self.form._script and self.form._script.get("id") == script_id:
+            self.form.load_script(updated)
+        return updated
+
+    def _home_edit_group_name(self, group_id, value):
+        """Persist an inline group-name edit and resync the editor side."""
+        updated = self._update_config_item("groups", group_id, "name", value)
+        if updated is None:
+            return None
+        self._rebuild_groups_view()
+        self.form._rebuild_group_checkboxes()
+        if self.group_form._group and self.group_form._group.get("id") == group_id:
+            self.group_form.load_group(updated)
+        return updated
 
     def _on_view_toggled(self, button, view):
         if self._switching_view or not button.get_active():
@@ -1742,7 +1422,7 @@ class ManagerWindow(Gtk.ApplicationWindow):
         self.view_editor_btn.set_active(name == "detail")
         self._switching_view = False
         if name == "home":
-            self._reload_home_active()
+            self.home_view.reload_active()
 
     def _load_list(self):
         for row in self.listbox.get_children():
@@ -1757,7 +1437,7 @@ class ManagerWindow(Gtk.ApplicationWindow):
             self._rebuild_groups_view()
         if self.group_form._group:
             self.group_form._rebuild_script_checkboxes()
-        self._reload_home_active()
+        self.home_view.reload_active()
 
     def _filter_row(self, row: ScriptRow) -> bool:
         query = self.search_entry.get_text().lower()
