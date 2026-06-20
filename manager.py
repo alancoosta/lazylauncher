@@ -898,12 +898,12 @@ class ManagerWindow(Gtk.ApplicationWindow):
         port_str = cur.get("port", "").strip()
         port_busy = False
         if port_str and port_str.isdigit() and not is_running:
-            from tray import _is_port_in_use
+            from runner import _is_port_in_use
             port_busy = _is_port_in_use(int(port_str))
         self.form.stop_btn.set_sensitive(is_running or port_busy)
         self.form.restart_btn.set_sensitive(is_running)
         if is_running:
-            from tray import find_ports_for_pid
+            from runner import find_ports_for_pid
             pid = find_script_pid(sid)
             ports = find_ports_for_pid(pid) if pid else []
             if ports:
@@ -1148,7 +1148,7 @@ class ManagerWindow(Gtk.ApplicationWindow):
     def _run_group(self, group):
         cfg = load_config()
         gid = group["id"]
-        from tray import run_script
+        from runner import run_script
         group_scripts = [
             s for s in cfg.get("scripts", [])
             if gid in s.get("groups", []) and s.get("enabled", True)
@@ -1187,7 +1187,7 @@ class ManagerWindow(Gtk.ApplicationWindow):
                 stop_script(sid)
                 port_str = script.get("port", "").strip()
                 if port_str and port_str.isdigit():
-                    from tray import kill_port
+                    from runner import kill_port
                     kill_port(int(port_str))
                 count += 1
         self._refresh_running_badges()
@@ -1198,7 +1198,7 @@ class ManagerWindow(Gtk.ApplicationWindow):
         cfg = load_config()
         gid = group["id"]
         running = get_running_ids()
-        from tray import run_script
+        from runner import run_script
         scripts_to_restart = []
         for script in cfg.get("scripts", []):
             sid = script.get("id", "")
@@ -1206,7 +1206,7 @@ class ManagerWindow(Gtk.ApplicationWindow):
                 stop_script(sid)
                 port_str = script.get("port", "").strip()
                 if port_str and port_str.isdigit():
-                    from tray import kill_port
+                    from runner import kill_port
                     kill_port(int(port_str))
                 scripts_to_restart.append(script)
         self._refresh_running_badges()
@@ -1286,7 +1286,7 @@ class ManagerWindow(Gtk.ApplicationWindow):
         stop_script(sid)
         port_str = script.get("port", "").strip()
         if port_str and port_str.isdigit():
-            from tray import kill_port
+            from runner import kill_port
             kill_port(int(port_str))
         self._refresh_running_badges()
         if self._sidebar_mode == "groups":
@@ -1877,7 +1877,7 @@ class ManagerWindow(Gtk.ApplicationWindow):
     def _run_script(self, script: dict):
         if not script or not script.get("command", "").strip():
             return
-        from tray import run_script
+        from runner import run_script
         run_script(script)
         # Refresh after a short delay so the process has time to register
         GLib.timeout_add(500, lambda: self._refresh_running_badges() and False)
@@ -1889,7 +1889,7 @@ class ManagerWindow(Gtk.ApplicationWindow):
         # Also kill by port if configured (fallback for stubborn processes)
         port_str = script.get("port", "").strip()
         if port_str and port_str.isdigit():
-            from tray import kill_port
+            from runner import kill_port
             kill_port(int(port_str))
         self._refresh_running_badges()
         self._show_toast("Script stopped ■")
