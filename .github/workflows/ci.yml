@@ -24,4 +24,4 @@ jobs:
 
       # Smoke: the GTK-free modules must import cleanly.
       - name: Import smoke
-        run: python -c "import common, deps, ansi, log_view, sorting, config_io"
+        run: python -c "import common, deps, ansi, log_view, sorting, config_io, runner"

@@ -3,8 +3,13 @@
 
 Starting scripts (in a terminal or silently), tracking their PIDs, probing and
 killing ports, and sending completion notifications. Shared by the tray menu and
-the manager UI so neither owns the other's launch logic. Imports Gtk only for
-the confirm / port-kill / duplicate-run dialogs the launch flow shows.
+the manager UI so neither owns the other's launch logic.
+
+GTK-free on purpose: the launch flow needs to ask the user yes/no questions
+(confirm-before-run, kill-the-port, already-running), but the tray runs on GTK3
+(AppIndicator) and the manager on GTK4 — and a single process can't load both.
+So the dialogs are delegated to an injected *prompter* (see set_prompter); each
+UI installs its own toolkit-specific implementation at startup.
 """
 import json
 import os
@@ -25,12 +30,30 @@ from common import (
     rotate_log, log_path, normalize_env_vars, get_logger,
 )
 
-import gi
-gi.require_version("Gtk", "3.0")
-from gi.repository import Gtk
-
 
 USER_SHELL    = os.environ.get("SHELL", "/bin/bash")
+
+
+class _DefaultPrompter:
+    """Used when no UI installed a prompter (tests, headless): always proceed."""
+    def confirm(self, title, message=""):
+        return True
+
+    def duplicate_run(self, label, pid, ports):
+        return "another"
+
+
+_PROMPTER = _DefaultPrompter()
+
+
+def set_prompter(prompter):
+    """Install the UI's dialog implementation.
+
+    ``prompter`` must provide ``confirm(title, message) -> bool`` and
+    ``duplicate_run(label, pid, ports) -> "cancel" | "another" | "restart"``.
+    """
+    global _PROMPTER
+    _PROMPTER = prompter or _DefaultPrompter()
 
 
 _BLOCKED_ENV_KEYS = frozenset({
@@ -68,28 +91,9 @@ def _handle_duplicate_run(script, script_id, label):
     pid = find_script_pid(script_id)
     ports = find_ports_for_pid(pid) if pid else []
 
-    port_info = ""
-    if ports:
-        port_list = ", ".join(str(p) for p in ports)
-        port_info = f"\nListening on port(s): {port_list}"
+    choice = _PROMPTER.duplicate_run(label, pid, ports)
 
-    dialog = Gtk.MessageDialog(
-        flags=Gtk.DialogFlags.MODAL,
-        message_type=Gtk.MessageType.QUESTION,
-        buttons=Gtk.ButtonsType.NONE,
-        text=f"'{label}' is already running.{port_info}",
-    )
-    if pid:
-        dialog.format_secondary_text(f"PID: {pid}")
-    dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
-    dialog.add_button("Run Another", Gtk.ResponseType.YES)
-    kill_btn = dialog.add_button("Kill & Restart", Gtk.ResponseType.ACCEPT)
-    kill_btn.get_style_context().add_class("destructive-action")
-
-    resp = dialog.run()
-    dialog.destroy()
-
-    if resp == Gtk.ResponseType.ACCEPT:
+    if choice == "restart":
         if ports:
             for port in ports:
                 kill_port(port)
@@ -98,7 +102,7 @@ def _handle_duplicate_run(script, script_id, label):
             _kill_safe(os.kill, pid, signal.SIGTERM)
         _mark_stopped(script_id)
         time.sleep(0.5)
-    elif resp != Gtk.ResponseType.YES:
+    elif choice != "another":
         return False
     return True
 
@@ -133,21 +137,13 @@ def _check_port_kill(script):
         text = f"Kill {name} (PID {pid}) on port :{port}?"
     else:
         text = f"Kill the process on port :{port}?"
-
-    dialog = Gtk.MessageDialog(
-        flags=Gtk.DialogFlags.MODAL,
-        message_type=Gtk.MessageType.WARNING,
-        buttons=Gtk.ButtonsType.YES_NO,
-        text=text,
-    )
+    secondary = ""
     if privileged:
-        dialog.format_secondary_text(
+        secondary = (
             f"Port {port} is a {'privileged' if port < 1024 else 'well-known service'} port. "
             "Killing it may disrupt system services."
         )
-    resp = dialog.run()
-    dialog.destroy()
-    if resp != Gtk.ResponseType.YES:
+    if not _PROMPTER.confirm(text, secondary):
         return False
 
     kill_port(port)
@@ -326,16 +322,9 @@ def run_script(script: dict):
     _save_exit_status(script_id, 0)
 
     if script.get("confirm", False):
-        dialog = Gtk.MessageDialog(
-            flags=Gtk.DialogFlags.MODAL,
-            message_type=Gtk.MessageType.WARNING,
-            buttons=Gtk.ButtonsType.OK_CANCEL,
-            text=f"Run '{label}'?",
-        )
-        dialog.format_secondary_text("This script requires confirmation before running.")
-        resp = dialog.run()
-        dialog.destroy()
-        if resp != Gtk.ResponseType.OK:
+        if not _PROMPTER.confirm(
+                f"Run '{label}'?",
+                "This script requires confirmation before running."):
             return
 
     cwd = str(Path(cwd).expanduser())

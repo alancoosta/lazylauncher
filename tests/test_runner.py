@@ -11,12 +11,8 @@ import types
 
 import pytest
 
-pytest.importorskip("gi")
-try:
-    import runner
-    import common
-except Exception:  # pragma: no cover - environment without GTK
-    pytest.skip("GTK unavailable", allow_module_level=True)
+import common
+import runner   # GTK-free since the launch engine was decoupled from the toolkit
 
 
 class _PopenRec:

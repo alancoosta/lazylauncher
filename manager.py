@@ -24,6 +24,7 @@ from common import (
 )
 from deps import run_group_ordered
 from sorting import sort_scripts
+from runner import set_prompter
 import ansi
 import config_io
 
@@ -41,6 +42,46 @@ from rows import ScriptRow, GroupRow
 from home_view import HomeView
 from script_form import ScriptForm
 from group_form import GroupForm
+
+
+class _GtkPrompter:
+    """GTK3 implementation of runner's prompter protocol (used by the manager).
+
+    runner is GTK-free; the manager installs this so the launch flow's yes/no
+    dialogs render with the manager's toolkit.
+    """
+
+    def confirm(self, title, message=""):
+        d = Gtk.MessageDialog(
+            flags=Gtk.DialogFlags.MODAL, message_type=Gtk.MessageType.WARNING,
+            buttons=Gtk.ButtonsType.YES_NO, text=title)
+        if message:
+            d.format_secondary_text(message)
+        resp = d.run()
+        d.destroy()
+        return resp == Gtk.ResponseType.YES
+
+    def duplicate_run(self, label, pid, ports):
+        port_info = ""
+        if ports:
+            port_info = "\nListening on port(s): " + ", ".join(str(p) for p in ports)
+        d = Gtk.MessageDialog(
+            flags=Gtk.DialogFlags.MODAL, message_type=Gtk.MessageType.QUESTION,
+            buttons=Gtk.ButtonsType.NONE,
+            text=f"'{label}' is already running.{port_info}")
+        if pid:
+            d.format_secondary_text(f"PID: {pid}")
+        d.add_button("Cancel", Gtk.ResponseType.CANCEL)
+        d.add_button("Run Another", Gtk.ResponseType.YES)
+        kill_btn = d.add_button("Kill & Restart", Gtk.ResponseType.ACCEPT)
+        kill_btn.get_style_context().add_class("destructive-action")
+        resp = d.run()
+        d.destroy()
+        if resp == Gtk.ResponseType.ACCEPT:
+            return "restart"
+        if resp == Gtk.ResponseType.YES:
+            return "another"
+        return "cancel"
 
 
 def _find_all_script_pids(script_id: str) -> list[int]:
@@ -484,6 +525,9 @@ class ManagerWindow(Gtk.ApplicationWindow):
 
         # Set ANSI colors based on theme
         ansi.set_theme(_is_dark_theme())
+
+        # runner is GTK-free; install the manager's dialogs for the launch flow.
+        set_prompter(_GtkPrompter())
 
         # CSS
         provider = Gtk.CssProvider()

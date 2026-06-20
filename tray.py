@@ -18,6 +18,7 @@ from common import (
 )
 from runner import (
     run_script, _stop_script, _cleanup_stale_tempfiles, find_ports_for_pid,
+    set_prompter,
 )
 
 import gi
@@ -49,6 +50,42 @@ _HICOLOR_ICON = Path.home() / ".local/share/icons/hicolor/scalable/apps/lazylaun
 
 
 DEFAULT_ICON  = "lazylauncher" if _HICOLOR_ICON.exists() else DEFAULT_ICON_PATH
+
+
+class _GtkPrompter:
+    """GTK3 implementation of runner's prompter protocol (used by the tray)."""
+
+    def confirm(self, title, message=""):
+        d = Gtk.MessageDialog(
+            flags=Gtk.DialogFlags.MODAL, message_type=Gtk.MessageType.WARNING,
+            buttons=Gtk.ButtonsType.YES_NO, text=title)
+        if message:
+            d.format_secondary_text(message)
+        resp = d.run()
+        d.destroy()
+        return resp == Gtk.ResponseType.YES
+
+    def duplicate_run(self, label, pid, ports):
+        port_info = ""
+        if ports:
+            port_info = "\nListening on port(s): " + ", ".join(str(p) for p in ports)
+        d = Gtk.MessageDialog(
+            flags=Gtk.DialogFlags.MODAL, message_type=Gtk.MessageType.QUESTION,
+            buttons=Gtk.ButtonsType.NONE,
+            text=f"'{label}' is already running.{port_info}")
+        if pid:
+            d.format_secondary_text(f"PID: {pid}")
+        d.add_button("Cancel", Gtk.ResponseType.CANCEL)
+        d.add_button("Run Another", Gtk.ResponseType.YES)
+        kill_btn = d.add_button("Kill & Restart", Gtk.ResponseType.ACCEPT)
+        kill_btn.get_style_context().add_class("destructive-action")
+        resp = d.run()
+        d.destroy()
+        if resp == Gtk.ResponseType.ACCEPT:
+            return "restart"
+        if resp == Gtk.ResponseType.YES:
+            return "another"
+        return "cancel"
 
 
 def _scan_running_commands() -> set:
@@ -333,6 +370,7 @@ def main():
     ICON_DIR.mkdir(parents=True, exist_ok=True)
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     _cleanup_stale_tempfiles()
+    set_prompter(_GtkPrompter())   # runner is GTK-free; give it our GTK3 dialogs
 
     log = get_logger()
     log.info("tray starting")
