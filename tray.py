@@ -215,10 +215,32 @@ def _write_launcher(cmd, cwd, log_str, pidfile, login_shell=True):
         L += [cmd, "rc=$?"]
     L += ["echo", 'echo "--- finished (exit $rc) ---"', 'read -p "Press Enter..."']
     fd, path = tempfile.mkstemp(prefix="lazylauncher-", suffix=".sh")
+    # Self-delete on normal exit so launchers don't pile up in /tmp. If the user
+    # closes the terminal mid-run the rm is skipped, so the startup sweep
+    # (_cleanup_stale_tempfiles) is the safety net for those.
+    L.append(f"rm -f {shlex.quote(path)}")
     with os.fdopen(fd, "w") as f:
         f.write("\n".join(L) + "\n")
     os.chmod(path, 0o700)
     return path
+
+
+def _cleanup_stale_tempfiles(max_age: float = 24 * 60 * 60):
+    """Remove orphaned launcher scripts/pidfiles left behind by closed terminals.
+
+    A launcher self-deletes when its terminal exits normally, but a window
+    closed mid-run leaks its ``.sh`` (and ``.pid``). Sweep anything older than
+    ``max_age`` on startup so /tmp never accumulates them indefinitely.
+    """
+    tmp = Path(tempfile.gettempdir())
+    now = time.time()
+    for pattern in ("lazylauncher-*.sh", "lazylauncher-*.pid"):
+        for f in tmp.glob(pattern):
+            try:
+                if now - f.stat().st_mtime > max_age:
+                    f.unlink()
+            except OSError:
+                pass
 
 
 def _read_pidfile(pidfile, timeout=5.0):
@@ -235,6 +257,21 @@ def _read_pidfile(pidfile, timeout=5.0):
     return 0
 
 
+def _capture_terminal_pid(pidfile: str, script_id: str):
+    """Poll for the launcher's real PID, record it, then drop the pidfile.
+
+    Runs in a background thread: ``_read_pidfile`` blocks up to a few seconds
+    waiting for the launcher to write ``$$``, and doing that on the GTK main
+    thread would freeze the tray menu on every terminal launch.
+    """
+    real_pid = _read_pidfile(pidfile)
+    try:
+        os.unlink(pidfile)
+    except OSError:
+        pass
+    _mark_running(script_id, real_pid)
+
+
 def _run_in_terminal(cmd, cwd, env, script_id, label, login_shell=True):
     """Run a script in a terminal emulator with log tee, tracking the real PID."""
     log_str = ""
@@ -243,11 +280,10 @@ def _run_in_terminal(cmd, cwd, env, script_id, label, login_shell=True):
         rotate_log(lp)
         log_str = str(lp)
 
-    pidfile = str(Path(tempfile.gettempdir()) / f"lazylauncher-{script_id or 'x'}.pid")
-    try:
-        Path(pidfile).unlink()
-    except OSError:
-        pass
+    # Unique, unpredictable pidfile (mkstemp, 0600) avoids both the shared-/tmp
+    # clobber vector of a fixed name and collisions between concurrent runs.
+    fd, pidfile = tempfile.mkstemp(prefix=f"lazylauncher-{script_id or 'x'}-", suffix=".pid")
+    os.close(fd)
     launcher = _write_launcher(cmd, cwd, log_str, pidfile, login_shell)
     q = shlex.quote(launcher)
 
@@ -265,13 +301,19 @@ def _run_in_terminal(cmd, cwd, env, script_id, label, login_shell=True):
     for term in terminals:
         try:
             subprocess.Popen(term, env=env, start_new_session=True)
-            real_pid = _read_pidfile(pidfile)   # PID of the shell, not the terminal client
-            _mark_running(script_id, real_pid or 0)
-            return
         except FileNotFoundError:
             continue
+        # Capture the shell PID off the main thread so the UI never freezes.
+        threading.Thread(
+            target=_capture_terminal_pid, args=(pidfile, script_id), daemon=True
+        ).start()
+        return
 
     # Fallback: run the launcher directly in the background (Popen pid is the shell)
+    try:
+        os.unlink(pidfile)
+    except OSError:
+        pass
     proc = subprocess.Popen([USER_SHELL, launcher], cwd=cwd, env=env, start_new_session=True)
     _mark_running(script_id, proc.pid)
 
@@ -362,8 +404,44 @@ def _extract_ports_from_ss(output: str, target_pid: str) -> list[int]:
     return ports
 
 
+def _descendant_pids(root: int) -> list[int]:
+    """Return ``root`` plus every descendant PID (the whole process tree).
+
+    Builds the parent->children map from a single ``/proc`` scan (no extra
+    subprocess) so a server reached through intermediate processes — ``npm`` ->
+    ``node``, ``docker``, a wrapper shell — is still matched. The previous
+    one-level ``pgrep -P`` only saw direct children and missed grandchildren.
+
+    PPID is field 4 of ``/proc/<pid>/stat``; the command name (field 2) may
+    contain spaces and parentheses, so we split on the last ``)`` first.
+    """
+    children = {}
+    try:
+        entries = list(Path("/proc").iterdir())
+    except OSError:
+        return [root]
+    for p in entries:
+        if not p.name.isdigit():
+            continue
+        try:
+            stat = (p / "stat").read_text()
+            ppid = int(stat.rsplit(")", 1)[1].split()[1])
+        except (OSError, ValueError, IndexError):
+            continue
+        children.setdefault(ppid, []).append(int(p.name))
+
+    seen, stack = [], [root]
+    while stack:
+        cur = stack.pop()
+        if cur in seen:
+            continue
+        seen.append(cur)
+        stack.extend(children.get(cur, []))
+    return seen
+
+
 def find_ports_for_pid(pid: int) -> list[int]:
-    """Find TCP ports a process (and its children) is listening on."""
+    """Find TCP ports a process (and its whole subtree) is listening on."""
     try:
         result = subprocess.run(
             ["ss", "-tlnp"], capture_output=True, text=True, timeout=3
@@ -371,19 +449,11 @@ def find_ports_for_pid(pid: int) -> list[int]:
     except Exception:
         return []
 
-    ports = _extract_ports_from_ss(result.stdout, str(pid))
-
-    # Also check child processes
-    if not ports:
-        try:
-            children = subprocess.run(
-                ["pgrep", "-P", str(pid)], capture_output=True, text=True, timeout=3
-            )
-            for child_pid in children.stdout.strip().splitlines():
-                if child_pid.strip().isdigit():
-                    ports.extend(_extract_ports_from_ss(result.stdout, child_pid.strip()))
-        except Exception:
-            pass
+    ports = []
+    for descendant in _descendant_pids(pid):
+        for port in _extract_ports_from_ss(result.stdout, str(descendant)):
+            if port not in ports:
+                ports.append(port)
     return ports
 
 
@@ -815,6 +885,7 @@ def main():
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     ICON_DIR.mkdir(parents=True, exist_ok=True)
     LOG_DIR.mkdir(parents=True, exist_ok=True)
+    _cleanup_stale_tempfiles()
 
     log = get_logger()
     log.info("tray starting")
