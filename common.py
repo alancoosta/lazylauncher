@@ -256,7 +256,7 @@ def get_error_states() -> dict:
             with open(ERROR_STATE_FILE) as f:
                 return json.load(f)
     except Exception:
-        pass
+        get_logger().debug("get_error_states failed", exc_info=True)
     return {}
 
 
@@ -272,7 +272,7 @@ def clear_error_state(script_id: str):
         state.pop(script_id, None)
         _safe_write(ERROR_STATE_FILE, json.dumps(state))
     except Exception:
-        pass
+        get_logger().debug("clear_error_state failed", exc_info=True)
 
 
 def _get_pid_start_time(pid: int) -> str:
@@ -310,7 +310,7 @@ def _mark_stopped(script_id: str):
             state.pop(script_id, None)
             _safe_write(RUN_STATE_FILE, json.dumps(state))
     except Exception:
-        pass
+        get_logger().debug("_mark_stopped failed", exc_info=True)
 
 
 def get_running_ids() -> set:
@@ -335,7 +335,7 @@ def get_running_ids() -> set:
                 if len(alive) != len(state):
                     _safe_write(RUN_STATE_FILE, json.dumps(alive))
         except Exception:
-            pass
+            get_logger().debug("get_running_ids failed", exc_info=True)
     return tracked
 
 
@@ -357,7 +357,7 @@ def find_script_pid(script_id: str) -> int:
             if pid and _is_pid_alive(pid, start_time):
                 return pid
         except Exception:
-            pass
+            get_logger().debug("find_script_pid failed", exc_info=True)
     return 0
 
 
