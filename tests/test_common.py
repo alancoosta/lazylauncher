@@ -3,7 +3,7 @@ import json
 import os
 import time
 
-import common
+from lazylauncher import common
 
 
 # -- normalize_env_vars -------------------------------------------------------

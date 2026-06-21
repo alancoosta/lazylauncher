@@ -1,5 +1,5 @@
 """Tests for ansi.py — SGR parsing, escape stripping, theme palette. GTK-free."""
-import ansi
+from lazylauncher import ansi
 
 
 def setup_function(_):

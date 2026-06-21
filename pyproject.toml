@@ -1,0 +1,6 @@
+[tool.pytest.ini_options]
+# The app ships as a flat package (`lazylauncher/`) imported by name. Adding the
+# repo root to the path makes `import lazylauncher` resolve regardless of how
+# pytest is invoked (bare `pytest`, `python -m pytest`, IDE runner).
+pythonpath = ["."]
+testpaths = ["tests"]

@@ -6,10 +6,10 @@ import gi
 gi.require_version("Gtk", "3.0")
 from gi.repository import Gtk
 
-from common import load_config
-from env_table import EnvVarsTable
-from log_panel import LogPanel
-from ui_shared import _STOP_LABEL
+from .common import load_config
+from .env_table import EnvVarsTable
+from .log_panel import LogPanel
+from .ui_shared import _STOP_LABEL
 
 
 class ScriptForm(Gtk.Box):

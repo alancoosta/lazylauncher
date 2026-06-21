@@ -4,7 +4,7 @@ import gi
 gi.require_version("Gtk", "3.0")
 from gi.repository import Gtk
 
-from common import config_lock, load_config, save_config, get_running_ids
+from .common import config_lock, load_config, save_config, get_running_ids
 
 
 class GroupForm(Gtk.Box):

@@ -30,7 +30,7 @@ fi
 
 # If piped via curl (no local repo), clone to a temp directory first
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || true
-if [ -z "$SCRIPT_DIR" ] || [ ! -f "$SCRIPT_DIR/tray.py" ]; then
+if [ -z "$SCRIPT_DIR" ] || [ ! -f "$SCRIPT_DIR/lazylauncher/tray.py" ]; then
     echo "==> Downloading LazyLauncher..."
     TMPDIR="$(mktemp -d)"
     git clone --depth 1 "$REPO_URL" "$TMPDIR"
@@ -104,23 +104,26 @@ echo "==> Copying files to $INSTALL_DIR..."
 mkdir -p "$INSTALL_DIR" "$BIN_DIR" "$CONFIG_DIR"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# Copy every top-level app module. Using a glob (not a hand-maintained list)
-# means new modules — runner, sorting, the componentized UI widgets, etc. —
-# are installed automatically instead of leaving the app with a missing import.
-cp "$SCRIPT_DIR/"*.py "$INSTALL_DIR/"
-mkdir -p "$INSTALL_DIR/icons"
-cp "$SCRIPT_DIR/icons/"*.png "$INSTALL_DIR/icons/" 2>/dev/null || true
-cp "$SCRIPT_DIR/icons/"*.svg "$INSTALL_DIR/icons/" 2>/dev/null || true
+# Drop any stale pre-package layout (flat *.py + icons/ sitting directly in
+# INSTALL_DIR) so old installs upgrade cleanly to the package layout.
+rm -f "$INSTALL_DIR/"*.py
+rm -rf "$INSTALL_DIR/icons" "$INSTALL_DIR/lazylauncher"
+# Copy the whole package (modules + bundled icons) in one shot. Copying the
+# directory — not a hand-maintained file list — means new modules are installed
+# automatically instead of leaving the app with a missing import.
+cp -r "$SCRIPT_DIR/lazylauncher" "$INSTALL_DIR/"
+# Don't ship stale bytecode picked up from a dev checkout.
+find "$INSTALL_DIR/lazylauncher" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true
 
 # Install icons into hicolor theme for proper desktop rendering
 HICOLOR="$HOME/.local/share/icons/hicolor"
 for size in 48 64 128 256 512; do
     dest="$HICOLOR/${size}x${size}/apps"
     mkdir -p "$dest"
-    cp "$SCRIPT_DIR/icons/logo-${size}.png" "$dest/lazylauncher.png"
+    cp "$SCRIPT_DIR/lazylauncher/icons/logo-${size}.png" "$dest/lazylauncher.png"
 done
 mkdir -p "$HICOLOR/scalable/apps"
-cp "$SCRIPT_DIR/icons/logo.svg" "$HICOLOR/scalable/apps/lazylauncher.svg"
+cp "$SCRIPT_DIR/lazylauncher/icons/logo.svg" "$HICOLOR/scalable/apps/lazylauncher.svg"
 gtk-update-icon-cache -f -t "$HICOLOR" 2>/dev/null || true
 
 # ── 3. launcher script ────────────────────────────────────────────────────────
@@ -128,7 +131,10 @@ echo "==> Creating launcher command..."
 
 cat > "$BIN_DIR/lazylauncher" << 'EOF'
 #!/usr/bin/env bash
-exec -a lazylauncher python3 "$HOME/.local/share/lazylauncher/lazylauncher.py" "$@"
+# The app is a package under ~/.local/share/lazylauncher/lazylauncher; put its
+# parent on PYTHONPATH and run it with -m.
+exec -a lazylauncher env PYTHONPATH="$HOME/.local/share/lazylauncher${PYTHONPATH:+:$PYTHONPATH}" \
+    python3 -m lazylauncher "$@"
 EOF
 chmod +x "$BIN_DIR/lazylauncher"
 

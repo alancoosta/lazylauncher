@@ -90,13 +90,14 @@ lazylauncher --uninstall --purge  # also removes config + state
 
 ## Development
 
-Two processes that share one launch engine:
+The app is the `lazylauncher/` package, run with `python -m lazylauncher`
+(`__main__.py` is the entry point). Two processes share one launch engine:
 
 - **Engine (toolkit-free):** `common.py` (config/logs/run-state, with file locks),
   `runner.py` (launch in terminal or silent, PID tracking, port probe/kill,
   notifications — GTK-free; each UI injects its dialogs via `set_prompter`),
   plus pure helpers `sorting.py`, `config_io.py`, `deps.py`, `ansi.py`, `log_view.py`.
-- **Tray** (`tray.py`, entry `lazylauncher.py`) — GTK3 + AppIndicator.
+- **Tray** (`tray.py`) — GTK3 + AppIndicator.
 - **Manager window** (`manager.py`) + widgets `ui_shared`, `rows`, `env_table`,
   `script_form`, `log_panel`, `home_view`, `group_form` — GTK3.
 
@@ -105,6 +106,7 @@ pytest -q          # GTK-free suite (runner/common/sorting/config_io/… run wit
 ruff check .       # lint
 ```
 
-`install.sh` copies every top-level `*.py`, so new modules ship automatically.
+`install.sh` copies the whole `lazylauncher/` package, so new modules ship
+automatically.
 The codebase targets GTK3 deliberately — AppIndicator has no GTK4 build, so the
 tray can't migrate.

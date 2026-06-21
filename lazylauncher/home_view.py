@@ -10,9 +10,9 @@ import gi
 gi.require_version("Gtk", "3.0")
 from gi.repository import Gtk, Pango
 
-from common import load_config
-from sorting import port_sort_key
-from ui_shared import make_tab_button
+from .common import load_config
+from .sorting import port_sort_key
+from .ui_shared import make_tab_button
 
 
 class HomeView(Gtk.Box):

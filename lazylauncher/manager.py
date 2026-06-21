@@ -15,33 +15,33 @@ import time
 import uuid
 from pathlib import Path
 
-from common import (
+from .common import (
     CONFIG_FILE,
     config_lock, load_config, save_config,
     get_error_states, get_running_ids, find_script_pid,
     _is_pid_alive, _mark_stopped,
     migrate_state, ensure_seed_config,
 )
-from deps import run_group_ordered
-from sorting import sort_scripts
-from runner import set_prompter
-import ansi
-import config_io
+from .deps import run_group_ordered
+from .sorting import sort_scripts
+from .runner import set_prompter
+from . import ansi
+from . import config_io
 
 import gi
 gi.require_version("Gtk", "3.0")
 from gi.repository import Gtk, Gdk, GLib
 
-from ui_shared import (
+from .ui_shared import (
     _STOP_LABEL,
     _TIP_SORT_NAME_AZ, _TIP_SORT_NAME_ZA,
     _TIP_RUNNING_FIRST, _TIP_STOPPED_FIRST,
     _is_dark_theme, new_script, new_group, make_tab_button,
 )
-from rows import ScriptRow, GroupRow
-from home_view import HomeView
-from script_form import ScriptForm
-from group_form import GroupForm
+from .rows import ScriptRow, GroupRow
+from .home_view import HomeView
+from .script_form import ScriptForm
+from .group_form import GroupForm
 
 
 class _GtkPrompter:
@@ -967,12 +967,12 @@ class ManagerWindow(Gtk.ApplicationWindow):
         port_str = cur.get("port", "").strip()
         port_busy = False
         if port_str and port_str.isdigit() and not is_running:
-            from runner import _is_port_in_use
+            from .runner import _is_port_in_use
             port_busy = _is_port_in_use(int(port_str))
         self.form.stop_btn.set_sensitive(is_running or port_busy)
         self.form.restart_btn.set_sensitive(is_running)
         if is_running:
-            from runner import find_ports_for_pid
+            from .runner import find_ports_for_pid
             pid = find_script_pid(sid)
             ports = find_ports_for_pid(pid) if pid else []
             if ports:
@@ -1217,7 +1217,7 @@ class ManagerWindow(Gtk.ApplicationWindow):
     def _run_group(self, group):
         cfg = load_config()
         gid = group["id"]
-        from runner import run_script
+        from .runner import run_script
         group_scripts = [
             s for s in cfg.get("scripts", [])
             if gid in s.get("groups", []) and s.get("enabled", True)
@@ -1256,7 +1256,7 @@ class ManagerWindow(Gtk.ApplicationWindow):
                 stop_script(sid)
                 port_str = script.get("port", "").strip()
                 if port_str and port_str.isdigit():
-                    from runner import kill_port
+                    from .runner import kill_port
                     kill_port(int(port_str))
                 count += 1
         self._refresh_running_badges()
@@ -1267,7 +1267,7 @@ class ManagerWindow(Gtk.ApplicationWindow):
         cfg = load_config()
         gid = group["id"]
         running = get_running_ids()
-        from runner import run_script
+        from .runner import run_script
         scripts_to_restart = []
         for script in cfg.get("scripts", []):
             sid = script.get("id", "")
@@ -1275,7 +1275,7 @@ class ManagerWindow(Gtk.ApplicationWindow):
                 stop_script(sid)
                 port_str = script.get("port", "").strip()
                 if port_str and port_str.isdigit():
-                    from runner import kill_port
+                    from .runner import kill_port
                     kill_port(int(port_str))
                 scripts_to_restart.append(script)
         self._refresh_running_badges()
@@ -1355,7 +1355,7 @@ class ManagerWindow(Gtk.ApplicationWindow):
         stop_script(sid)
         port_str = script.get("port", "").strip()
         if port_str and port_str.isdigit():
-            from runner import kill_port
+            from .runner import kill_port
             kill_port(int(port_str))
         self._refresh_running_badges()
         if self._sidebar_mode == "groups":
@@ -1613,7 +1613,7 @@ class ManagerWindow(Gtk.ApplicationWindow):
     def _run_script(self, script: dict):
         if not script or not script.get("command", "").strip():
             return
-        from runner import run_script
+        from .runner import run_script
         run_script(script)
         # Refresh after a short delay so the process has time to register
         GLib.timeout_add(500, lambda: self._refresh_running_badges() and False)
@@ -1625,7 +1625,7 @@ class ManagerWindow(Gtk.ApplicationWindow):
         # Also kill by port if configured (fallback for stubborn processes)
         port_str = script.get("port", "").strip()
         if port_str and port_str.isdigit():
-            from runner import kill_port
+            from .runner import kill_port
             kill_port(int(port_str))
         self._refresh_running_badges()
         self._show_toast("Script stopped ■")

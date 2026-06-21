@@ -9,7 +9,7 @@ hashing/summaries, the ANSI-stripped→raw position map, and the theme palette.
 import json
 import re
 
-import ansi
+from . import ansi
 
 
 def theme_log_colors(dark: bool) -> dict:

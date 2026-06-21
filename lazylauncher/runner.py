@@ -22,7 +22,7 @@ import threading
 import time
 from pathlib import Path
 
-from common import (
+from .common import (
     RUN_STATE_FILE, ERROR_STATE_FILE,
     _safe_write, config_lock, run_state_lock, load_config, save_config,
     get_running_ids, find_script_pid,

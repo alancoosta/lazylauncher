@@ -1,7 +1,7 @@
 """Tests for config_io.py — the GTK-free import merge logic."""
 import json
 
-import config_io
+from lazylauncher import config_io
 
 
 def test_merge_adds_new_scripts_and_groups():

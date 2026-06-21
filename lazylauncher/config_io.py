@@ -8,7 +8,7 @@ unit-tested without a display.
 import json
 import shutil
 
-from common import CONFIG_FILE
+from .common import CONFIG_FILE
 
 
 def read_config_file(path) -> dict:

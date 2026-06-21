@@ -11,8 +11,8 @@ import types
 
 import pytest
 
-import common
-import runner   # GTK-free since the launch engine was decoupled from the toolkit
+from lazylauncher import common
+from lazylauncher import runner   # GTK-free since the launch engine was decoupled from the toolkit
 
 
 class _PopenRec:

@@ -1,5 +1,5 @@
 """Tests for sorting.py — pure script ordering (GTK-free)."""
-import sorting
+from lazylauncher import sorting
 
 
 def _scripts():

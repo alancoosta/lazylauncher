@@ -18,9 +18,6 @@ try:
 except Exception:
     pass
 
-# Ensure the install directory is importable
-sys.path.insert(0, str(Path(__file__).parent))
-
 
 def _uninstall(purge: bool):
     """Remove files placed by install.sh. Keep user config unless --purge."""
@@ -36,7 +33,7 @@ def _uninstall(purge: bool):
     for size in (48, 64, 128, 256, 512):
         targets.append(home / f".local/share/icons/hicolor/{size}x{size}/apps/lazylauncher.png")
     if purge:
-        from common import CONFIG_DIR, STATE_DIR
+        from .common import CONFIG_DIR, STATE_DIR
         targets += [CONFIG_DIR, STATE_DIR]
 
     for t in targets:
@@ -56,12 +53,12 @@ def _uninstall(purge: bool):
 
 def _run_by_id(script_id: str) -> int:
     """Run a configured script by id, without opening the manager."""
-    from common import load_config
+    from .common import load_config
     script = next((s for s in load_config().get("scripts", []) if s.get("id") == script_id), None)
     if script is None:
         print(f"No script with id '{script_id}'", file=sys.stderr)
         return 1
-    from tray import run_script
+    from .tray import run_script
     run_script(script)
     return 0
 
@@ -71,11 +68,11 @@ def main():
 
     # GTK-free fast paths (work even without a display / GTK installed).
     if args and args[0] in ("--version", "-V"):
-        from common import VERSION
+        from .common import VERSION
         print(f"lazylauncher {VERSION}")
         return
     if args and args[0] == "--config-path":
-        from common import CONFIG_FILE
+        from .common import CONFIG_FILE
         print(CONFIG_FILE)
         return
     if args and args[0] == "--uninstall":
@@ -93,10 +90,10 @@ def main():
 
     if args and args[0] == "manage":
         sys.argv = [sys.argv[0]] + args[1:]  # strip "manage" from argv
-        from manager import main as manager_main
+        from .manager import main as manager_main
         manager_main()
     else:
-        from tray import main as tray_main
+        from .tray import main as tray_main
         tray_main()
 
 

@@ -1,5 +1,5 @@
 """Tests for log_view.py pure helpers. GTK-free."""
-import log_view
+from lazylauncher import log_view
 
 
 # -- is_complex_json ----------------------------------------------------------

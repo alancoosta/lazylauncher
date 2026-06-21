@@ -6,17 +6,18 @@ an AppIndicator menu with all registered scripts.
 Also spawns one extra indicator per script that has pinned_icon=true.
 """
 import json
+import os
 import subprocess
 import sys
 import signal
 from pathlib import Path
 
-from common import (
+from .common import (
     CONFIG_DIR, CONFIG_FILE, ICON_DIR, LOG_DIR,
     get_running_ids, find_script_pid, load_config, log_path,
     migrate_state, get_logger, ensure_seed_config,
 )
-from runner import (
+from .runner import (
     run_script, _stop_script, _cleanup_stale_tempfiles, find_ports_for_pid,
     set_prompter,
 )
@@ -101,9 +102,14 @@ def open_manager():
         except FileNotFoundError:
             pass
         return
-    entry = Path(__file__).parent / "lazylauncher.py"
-    _manager_proc = subprocess.Popen([sys.executable, str(entry), "manage"],
-                                     start_new_session=True)
+    # Relaunch ourselves as `python -m lazylauncher manage`; ensure the package's
+    # parent dir is importable regardless of the child's working directory.
+    pkg_parent = Path(__file__).resolve().parent.parent
+    env = {**os.environ, "PYTHONPATH": os.pathsep.join(
+        filter(None, [str(pkg_parent), os.environ.get("PYTHONPATH", "")]))}
+    _manager_proc = subprocess.Popen(
+        [sys.executable, "-m", "lazylauncher", "manage"],
+        env=env, start_new_session=True)
 
 
 def _open_log_file(path: str):

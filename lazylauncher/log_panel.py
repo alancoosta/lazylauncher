@@ -12,10 +12,10 @@ import gi
 gi.require_version("Gtk", "3.0")
 from gi.repository import Gtk, Gdk, Pango, GLib
 
-from common import LOG_DIR, get_error_states, clear_error_state
-import ansi
-import log_view
-from ui_shared import _is_dark_theme
+from .common import LOG_DIR, get_error_states, clear_error_state
+from . import ansi
+from . import log_view
+from .ui_shared import _is_dark_theme
 
 
 class LogPanel(Gtk.Box):

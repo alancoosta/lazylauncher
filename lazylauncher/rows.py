@@ -4,9 +4,9 @@ import gi
 gi.require_version("Gtk", "3.0")
 from gi.repository import Gtk, Pango
 
-from deps import resolve_order
-from sorting import sort_scripts
-from ui_shared import (
+from .deps import resolve_order
+from .sorting import sort_scripts
+from .ui_shared import (
     _TIP_SORT_NAME_AZ, _TIP_SORT_NAME_ZA,
     _TIP_RUNNING_FIRST, _TIP_STOPPED_FIRST,
 )

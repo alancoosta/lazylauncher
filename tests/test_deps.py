@@ -4,7 +4,7 @@ deps.py is GTK-free, so these run anywhere.
 """
 import pytest
 
-from deps import resolve_order, run_group_ordered, _port_of
+from lazylauncher.deps import resolve_order, run_group_ordered, _port_of
 
 
 # -- resolve_order ------------------------------------------------------------
