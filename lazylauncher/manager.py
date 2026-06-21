@@ -673,8 +673,8 @@ class ManagerWindow(Gtk.ApplicationWindow):
         view_switch = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
         view_switch.set_name("group-tabs")
         self._switching_view = False
-        self.view_home_btn = make_tab_button("Home", "home", self._on_view_toggled, active=True)
-        self.view_editor_btn = make_tab_button("Editor", "detail", self._on_view_toggled)
+        self.view_home_btn = make_tab_button("_Home", "home", self._on_view_toggled, active=True)
+        self.view_editor_btn = make_tab_button("_Editor", "detail", self._on_view_toggled)
         view_switch.pack_start(self.view_home_btn, False, False, 0)
         view_switch.pack_start(self.view_editor_btn, False, False, 0)
         hb.set_custom_title(view_switch)

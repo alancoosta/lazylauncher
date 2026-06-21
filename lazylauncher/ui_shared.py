@@ -29,8 +29,9 @@ _TIP_STOPPED_FIRST = "Stopped first"
 
 def make_tab_button(label, mode, on_toggled, active=False):
     """Build a styled segmented toggle button (the Home/Editor and Scripts/Groups
-    switchers share this look)."""
-    btn = Gtk.ToggleButton(label=label)
+    switchers share this look). An underscore in ``label`` marks a keyboard
+    mnemonic (e.g. "_Home" -> Alt+H)."""
+    btn = Gtk.ToggleButton(label=label, use_underline=True)
     btn.set_mode(False)
     btn.get_style_context().add_class("group-tab")
     btn.set_active(active)
