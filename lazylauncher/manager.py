@@ -609,6 +609,7 @@ class ManagerWindow(Gtk.ApplicationWindow):
             on_restart_script=self._home_restart_script,
             on_terminal_script=self._home_terminal_script,
             on_restart_group=self._home_restart_group,
+            on_add_script_to_group=self._home_add_script_to_group,
         )
         self.outer_stack.add_named(self.home_view, "home")
         self.outer_stack.add_named(hpaned, "detail")
@@ -1441,6 +1442,21 @@ class ManagerWindow(Gtk.ApplicationWindow):
         group = self._find_group(group_id)
         if group:
             self._restart_group(group)
+
+    def _home_add_script_to_group(self, script_id, group_id):
+        """Add an already-created script to a group from the Home view."""
+        with config_lock():
+            cfg = load_config()
+            for s in cfg.get("scripts", []):
+                if s.get("id") == script_id:
+                    groups = s.get("groups", [])
+                    if group_id not in groups:
+                        groups.append(group_id)
+                    s["groups"] = groups
+                    break
+            save_config(cfg)
+        self._load_list()  # rebuilds sidebar, group form and the home tables
+        self._show_toast("Script added to group")
 
     def _home_run_group(self, group_id):
         group = self._find_group(group_id)

@@ -53,7 +53,8 @@ class HomeView(Gtk.Box):
     def __init__(self, *, on_open_script, on_open_group, on_new_script,
                  on_new_group, on_run_script, on_stop_script, on_run_group,
                  on_stop_group, on_edit_script, on_edit_group_name,
-                 on_restart_script, on_terminal_script, on_restart_group):
+                 on_restart_script, on_terminal_script, on_restart_group,
+                 on_add_script_to_group):
         super().__init__(orientation=Gtk.Orientation.VERTICAL)
         self.get_style_context().add_class("home-table")
         self._on_open_script = on_open_script
@@ -69,6 +70,7 @@ class HomeView(Gtk.Box):
         self._on_restart_script = on_restart_script
         self._on_terminal_script = on_terminal_script
         self._on_restart_group = on_restart_group
+        self._on_add_script_to_group = on_add_script_to_group
         # Ids of currently-running scripts; drives the green run icon. Refreshed
         # by reload_*/refresh_running.
         self._running_ids = set()
@@ -210,6 +212,11 @@ class HomeView(Gtk.Box):
             child = model.iter_next(child)
         return False
 
+    def _group_add_cell_data(self, _column, cell, model, it, _data):
+        """The 'add existing script' icon only makes sense on group rows."""
+        is_group = model[it][self._HOME_G_COL_KIND] == "group"
+        cell.set_property("icon-name", "list-add-symbolic" if is_group else None)
+
     def refresh_running(self, running_ids):
         """Update the cached running set and repaint the run icons in place
         (no model rebuild, so selection/scroll are preserved)."""
@@ -284,6 +291,11 @@ class HomeView(Gtk.Box):
         self._home_group_action_columns = self._add_action_columns(
             self.home_groups_tree, self._home_groups_tree_button_press,
             self._group_row_running)
+        # Extra group-only column: add an already-created script to the group.
+        add_col, add_renderer = self._append_action_column(
+            self.home_groups_tree, "Add", "list-add-symbolic")
+        add_col.set_cell_data_func(add_renderer, self._group_add_cell_data, None)
+        self._home_group_add_column = add_col
 
         scroll = Gtk.ScrolledWindow()
         scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
@@ -425,16 +437,46 @@ class HomeView(Gtk.Box):
         return True
 
     def _home_groups_tree_button_press(self, tree, event):
-        key, path = self._action_column_hit(tree, event, self._home_group_action_columns)
+        if event.button != 1:
+            return False
+        info = tree.get_path_at_pos(int(event.x), int(event.y))
+        if not info:
+            return False
+        path, column, _, _ = info
+        row = self.home_groups_store[path]
+        # The 'add existing script' affordance lives only on group rows.
+        if column is self._home_group_add_column:
+            if row[self._HOME_G_COL_KIND] == "group":
+                self._popup_add_script_menu(row[self._HOME_G_COL_ID], event)
+            return True
+        key = self._home_group_action_columns.get(column)
         if not key:
             return False
-        row = self.home_groups_store[path]
         obj_id = row[self._HOME_G_COL_ID]
         if row[self._HOME_G_COL_KIND] == "script":
             self._home_script_action(key, obj_id)
         else:
             self._home_group_action(key, obj_id)
         return True
+
+    def _popup_add_script_menu(self, group_id, event):
+        """Pop up a menu of scripts not yet in the group; picking one adds it."""
+        addable = [s for s in load_config().get("scripts", [])
+                   if group_id not in s.get("groups", [])]
+        menu = Gtk.Menu()
+        if not addable:
+            item = Gtk.MenuItem(label="All scripts already in this group")
+            item.set_sensitive(False)
+            menu.append(item)
+        else:
+            for s in addable:
+                item = Gtk.MenuItem(label=s.get("name", "") or "(unnamed)")
+                item.connect(
+                    "activate",
+                    lambda _i, sid=s.get("id", ""): self._on_add_script_to_group(sid, group_id))
+                menu.append(item)
+        menu.show_all()
+        menu.popup_at_pointer(event)
 
     def _home_script_action(self, key, script_id):
         direct = {
