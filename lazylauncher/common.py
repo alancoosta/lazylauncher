@@ -32,6 +32,7 @@ RUN_STATE_FILE   = STATE_DIR / "run_state.json"
 ERROR_STATE_FILE = STATE_DIR / "error_state.json"
 APP_LOG_FILE     = STATE_DIR / "lazylauncher.log"
 RUN_LOCK_FILE    = STATE_DIR / ".run_state.lock"
+UI_STATE_FILE    = STATE_DIR / "ui_state.json"  # last-used tab etc. (not user data)
 
 MAX_LOG_SIZE   = 1024 * 1024        # 1 MB per log file
 MAX_LOG_AGE    = 30 * 24 * 60 * 60  # 30 days in seconds
@@ -99,6 +100,29 @@ def _safe_write(path: Path, data):
         except OSError:
             pass
         raise
+
+
+def load_ui_state() -> dict:
+    """Load persisted UI state (last-used tab, …). Best-effort: returns {} when
+    the file is missing or corrupt so a bad write never blocks the window."""
+    try:
+        with open(UI_STATE_FILE) as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_ui_state(**changes):
+    """Merge ``changes`` into the persisted UI state. Best-effort: a failure to
+    record UI preferences must never crash the app."""
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        state = load_ui_state()
+        state.update(changes)
+        _safe_write(UI_STATE_FILE, json.dumps(state))
+    except Exception:
+        pass
 
 
 @contextmanager

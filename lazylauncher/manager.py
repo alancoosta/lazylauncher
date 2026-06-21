@@ -21,6 +21,7 @@ from .common import (
     get_error_states, get_running_ids, find_script_pid,
     _is_pid_alive, _mark_stopped,
     migrate_state, ensure_seed_config,
+    load_ui_state, save_ui_state,
 )
 from .deps import run_group_ordered
 from .sorting import sort_scripts
@@ -615,6 +616,11 @@ class ManagerWindow(Gtk.ApplicationWindow):
         self.outer_stack.add_named(hpaned, "detail")
         self.outer_stack.set_visible_child_name("home")
         self.outer_stack.connect("notify::visible-child", self._on_view_changed)
+        # Reopen on the last-used top-level view (Home/Editor). Done after the
+        # signal is wired so _on_view_changed syncs the switch buttons.
+        saved_view = load_ui_state().get("view")
+        if saved_view in ("home", "detail"):
+            self.outer_stack.set_visible_child_name(saved_view)
 
         ScriptRow._on_run = self._run_script
         ScriptRow._on_stop = self._stop_single_script
@@ -1500,6 +1506,7 @@ class ManagerWindow(Gtk.ApplicationWindow):
         self.view_home_btn.set_active(name == "home")
         self.view_editor_btn.set_active(name == "detail")
         self._switching_view = False
+        save_ui_state(view=name)
         if name == "home":
             self.home_view.reload_active()
 

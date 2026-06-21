@@ -10,7 +10,7 @@ import gi
 gi.require_version("Gtk", "3.0")
 from gi.repository import Gtk, Gdk, Pango
 
-from .common import load_config, get_running_ids
+from .common import load_config, get_running_ids, load_ui_state, save_ui_state
 from .sorting import port_sort_key
 from .ui_shared import make_tab_button
 
@@ -98,6 +98,11 @@ class HomeView(Gtk.Box):
         self.home_inner_stack.add_named(self._build_scripts_page(), "scripts")
         self.home_inner_stack.add_named(self._build_groups_page(), "groups")
         self.pack_start(self.home_inner_stack, True, True, 0)
+
+        # Restore the last-used Home sub-tab (Scripts/Groups); toggling the
+        # button drives _on_home_tab_toggled which switches the stack.
+        if load_ui_state().get("home_tab") == "groups":
+            self.home_groups_tab.set_active(True)
 
     # -- toolbar / column helpers ------------------------------------------------
 
@@ -313,6 +318,7 @@ class HomeView(Gtk.Box):
         self._switching_home_tab = False
         self._home_mode = mode
         self.home_inner_stack.set_visible_child_name(mode)
+        save_ui_state(home_tab=mode)
         if mode == "groups":
             self.reload_groups()
         else:

@@ -30,6 +30,37 @@ def test_normalize_garbage_type():
     assert common.normalize_env_vars(123) == []
 
 
+# -- ui_state (last-used tab) -------------------------------------------------
+
+def _patch_ui_state(monkeypatch, tmp_path):
+    monkeypatch.setattr(common, "STATE_DIR", tmp_path)
+    monkeypatch.setattr(common, "UI_STATE_FILE", tmp_path / "ui_state.json")
+
+
+def test_ui_state_missing_returns_empty(monkeypatch, tmp_path):
+    _patch_ui_state(monkeypatch, tmp_path)
+    assert common.load_ui_state() == {}
+
+
+def test_ui_state_roundtrip_and_merge(monkeypatch, tmp_path):
+    _patch_ui_state(monkeypatch, tmp_path)
+    common.save_ui_state(view="detail")
+    common.save_ui_state(home_tab="groups")  # merges, does not clobber
+    assert common.load_ui_state() == {"view": "detail", "home_tab": "groups"}
+
+
+def test_ui_state_corrupt_file_returns_empty(monkeypatch, tmp_path):
+    _patch_ui_state(monkeypatch, tmp_path)
+    (tmp_path / "ui_state.json").write_text("{not json")
+    assert common.load_ui_state() == {}
+
+
+def test_ui_state_non_dict_returns_empty(monkeypatch, tmp_path):
+    _patch_ui_state(monkeypatch, tmp_path)
+    (tmp_path / "ui_state.json").write_text("[1, 2, 3]")
+    assert common.load_ui_state() == {}
+
+
 # -- _safe_write --------------------------------------------------------------
 
 def test_safe_write_atomic_perms_no_leftover(tmp_path):
