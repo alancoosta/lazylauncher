@@ -1799,15 +1799,25 @@ class ManagerWindow(Gtk.ApplicationWindow):
         GLib.timeout_add(1800, lambda: hb.set_subtitle(old) or False)
 
 
+# Valid reverse-DNS GApplication id (a bare "lazylauncher" is rejected, which
+# disabled single-instance and spewed GLib-GIO-CRITICAL). The window keeps
+# WM_CLASS "lazylauncher" (set_wmclass) so the .desktop's StartupWMClass match —
+# and thus the dock icon — is unaffected.
+APP_ID = "io.github.alancoosta.LazyLauncher"
+
+
 class ManagerApp(Gtk.Application):
     def __init__(self):
         from gi.repository import Gio
-        super().__init__(application_id="lazylauncher", flags=Gio.ApplicationFlags.FLAGS_NONE)
+        super().__init__(application_id=APP_ID, flags=Gio.ApplicationFlags.FLAGS_NONE)
 
     def do_activate(self):
-        win = ManagerWindow(self)
+        # Single-instance: reactivating (e.g. the tray relaunching us) must raise
+        # the existing window, not spawn a second one.
+        win = self.get_active_window()
+        if win is None:
+            win = ManagerWindow(self)
         win.present()
-        win.grab_focus()
 
 
 def main():
