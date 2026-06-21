@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="icons/logo.svg" alt="LazyLauncher" width="200">
+  <img src="lazylauncher/icons/logo.svg" alt="LazyLauncher" width="200">
 </p>
 
 <h1 align="center">LazyLauncher</h1>
