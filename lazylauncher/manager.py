@@ -199,6 +199,14 @@ headerbar .subtitle {
 .home-table treeview row {
     min-height: 0;
 }
+/* Keep the per-row action icons one constant color, like the editor sidebar's
+   icon buttons: hovering (or prelighting) a Home row must not recolor its
+   symbolic icons. The green run icon is a fixed pixbuf, unaffected by this. */
+.home-table treeview.view:hover,
+.home-table treeview.view:selected:hover,
+.home-table treeview.view row:hover {
+    color: @theme_text_color;
+}
 
 /* -- badges (semantic colors kept) -- */
 .badge-pinned {

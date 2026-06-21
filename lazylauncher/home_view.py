@@ -8,7 +8,7 @@ persistence are delegated to the manager via the callbacks passed to __init__.
 """
 import gi
 gi.require_version("Gtk", "3.0")
-from gi.repository import Gtk, Gdk, Pango
+from gi.repository import Gtk, Gdk, GdkPixbuf, Pango
 
 from .common import load_config, get_running_ids, load_ui_state, save_ui_state
 from .sorting import port_sort_key
@@ -16,6 +16,9 @@ from .ui_shared import make_tab_button
 
 # The running play icon is tinted with the same green the sidebar uses.
 _RUNNING_GREEN = "#27ae60"
+# Action icons render dimmed at rest and full-opacity on hover, mirroring the
+# editor sidebar's .btn-icon (opacity 0.6 -> 1). 153 ≈ 0.6 * 255.
+_ICON_DIM_ALPHA = 153
 
 
 class HomeView(Gtk.Box):
@@ -74,7 +77,9 @@ class HomeView(Gtk.Box):
         # Ids of currently-running scripts; drives the green run icon. Refreshed
         # by reload_*/refresh_running.
         self._running_ids = set()
-        self._green_run_pix = False  # lazy-built cache (None once a build fails)
+        self._icon_pix_cache = {}  # (icon_name, color_str, alpha) -> Pixbuf|None
+        self._hover_cell = {}      # tree -> (path str, column) under the pointer
+        self._green_rgba = None    # lazily parsed _RUNNING_GREEN
 
         # Sub-tabs: Scripts | Groups (same pattern as the editor sidebar)
         self._home_mode = "scripts"
@@ -167,39 +172,88 @@ class HomeView(Gtk.Box):
         wire its button-press handler. ``is_running(model, iter)`` decides when a
         row's run icon turns green. Returns the {column: key} map."""
         action_columns = {}
-        for title, icon, key in self._HOME_ACTIONS:
-            column, renderer = self._append_action_column(tree, title, icon)
+        for _title, icon, key in self._HOME_ACTIONS:
+            column, renderer = self._append_action_column(tree, _title, icon)
             action_columns[column] = key
-            if key == "run":
-                column.set_cell_data_func(renderer, self._run_cell_data, is_running)
+            column.set_cell_data_func(
+                renderer, self._action_icon_data, (icon, key, is_running, tree))
         tree.connect("button-press-event", on_click)
+        # Per-icon hover highlight: brighten the single action icon under the
+        # pointer. Needs the motion/leave masks or the handlers never fire.
+        tree.add_events(Gdk.EventMask.POINTER_MOTION_MASK
+                        | Gdk.EventMask.LEAVE_NOTIFY_MASK)
+        tree.connect("motion-notify-event", self._on_tree_motion)
+        tree.connect("leave-notify-event", self._on_tree_leave)
         return action_columns
 
-    # -- running indicator (green run icon) --------------------------------------
+    # -- action-icon rendering (dimmed at rest, bright on hover, run=green) -------
 
-    def _green_run_pixbuf(self):
-        """Lazily build (and cache) the green-tinted play icon; None on failure."""
-        if self._green_run_pix is not False:
-            return self._green_run_pix
-        self._green_run_pix = None
-        info = Gtk.IconTheme.get_default().lookup_icon(
-            "media-playback-start-symbolic", 16, 0)
+    def _symbolic_pixbuf(self, icon_name, rgba, alpha):
+        """Render a symbolic icon in ``rgba`` at ``alpha`` (cached). None on fail."""
+        key = (icon_name, rgba.to_string(), alpha)
+        if key in self._icon_pix_cache:
+            return self._icon_pix_cache[key]
+        pix = None
+        info = Gtk.IconTheme.get_default().lookup_icon(icon_name, 16, 0)
         if info is not None:
-            color = Gdk.RGBA()
-            color.parse(_RUNNING_GREEN)
             try:
-                self._green_run_pix, _ = info.load_symbolic(color, None, None, None)
+                base, _ = info.load_symbolic(rgba, None, None, None)
+                pix = base if alpha >= 255 else self._dim(base, alpha)
             except Exception:
-                self._green_run_pix = None
-        return self._green_run_pix
+                pix = None
+        self._icon_pix_cache[key] = pix
+        return pix
 
-    def _run_cell_data(self, _column, cell, model, it, is_running):
-        """Paint the run icon green for running rows, plain otherwise."""
-        if is_running(model, it):
-            cell.set_property("pixbuf", self._green_run_pixbuf())
+    @staticmethod
+    def _dim(pix, alpha):
+        """Return ``pix`` at a uniform ``alpha`` (0-255) over transparency."""
+        w, h = pix.get_width(), pix.get_height()
+        out = GdkPixbuf.Pixbuf.new(GdkPixbuf.Colorspace.RGB, True, 8, w, h)
+        out.fill(0x00000000)
+        pix.composite(out, 0, 0, w, h, 0, 0, 1, 1,
+                      GdkPixbuf.InterpType.NEAREST, alpha)
+        return out
+
+    def _normal_fg(self, tree):
+        """The theme's resting text colour — used regardless of row state so the
+        prelight never repaints the icons white."""
+        return tree.get_style_context().get_color(Gtk.StateFlags.NORMAL)
+
+    def _green(self):
+        if self._green_rgba is None:
+            self._green_rgba = Gdk.RGBA()
+            self._green_rgba.parse(_RUNNING_GREEN)
+        return self._green_rgba
+
+    def _cell_hovered(self, tree, column, model, it):
+        """True only for the single icon cell the pointer is over (per-icon
+        hover, like the editor's independent action buttons)."""
+        hp, hc = self._hover_cell.get(tree, (None, None))
+        return hc is column and hp == str(model.get_path(it))
+
+    def _action_icon_data(self, column, cell, model, it, data):
+        icon_name, key, is_running, tree = data
+        hovered = self._cell_hovered(tree, column, model, it)
+        if key == "run" and (is_running(model, it) or hovered):
+            rgba, alpha = self._green(), 255            # running / hover-armed
         else:
-            cell.set_property("pixbuf", None)
-            cell.set_property("icon-name", "media-playback-start-symbolic")
+            rgba = self._normal_fg(tree)
+            alpha = 255 if hovered else _ICON_DIM_ALPHA  # bright on hover, else dim
+        cell.set_property("pixbuf", self._symbolic_pixbuf(icon_name, rgba, alpha))
+
+    def _on_tree_motion(self, tree, event):
+        info = tree.get_path_at_pos(int(event.x), int(event.y))
+        new = (str(info[0]), info[1]) if info else (None, None)
+        if self._hover_cell.get(tree) != new:
+            self._hover_cell[tree] = new
+            tree.queue_draw()
+        return False
+
+    def _on_tree_leave(self, tree, _event):
+        if self._hover_cell.get(tree, (None, None)) != (None, None):
+            self._hover_cell[tree] = (None, None)
+            tree.queue_draw()
+        return False
 
     def _script_row_running(self, model, it):
         return model[it][self._HOME_COL_ID] in self._running_ids
@@ -217,10 +271,16 @@ class HomeView(Gtk.Box):
             child = model.iter_next(child)
         return False
 
-    def _group_add_cell_data(self, _column, cell, model, it, _data):
-        """The 'add existing script' icon only makes sense on group rows."""
-        is_group = model[it][self._HOME_G_COL_KIND] == "group"
-        cell.set_property("icon-name", "list-add-symbolic" if is_group else None)
+    def _group_add_cell_data(self, column, cell, model, it, _data):
+        """The 'add existing script' icon only makes sense on group rows; render
+        it dimmed/bright like the other action icons."""
+        if model[it][self._HOME_G_COL_KIND] != "group":
+            cell.set_property("pixbuf", None)
+            return
+        tree = self.home_groups_tree
+        alpha = 255 if self._cell_hovered(tree, column, model, it) else _ICON_DIM_ALPHA
+        cell.set_property(
+            "pixbuf", self._symbolic_pixbuf("list-add-symbolic", self._normal_fg(tree), alpha))
 
     def refresh_running(self, running_ids):
         """Update the cached running set and repaint the run icons in place
