@@ -186,8 +186,9 @@ def load_config() -> dict:
             return json.load(f)
     except Exception:
         # Preserve the corrupt file for manual recovery instead of clobbering it.
+        # time_ns() keeps the name unique even for two corruptions in one second.
         try:
-            corrupt = CONFIG_DIR / f".lazylauncher-config.corrupt-{int(time.time())}.json"
+            corrupt = CONFIG_DIR / f".lazylauncher-config.corrupt-{time.time_ns()}.json"
             shutil.copy2(str(CONFIG_FILE), str(corrupt))
             get_logger().error("Config unreadable; preserved copy at %s", corrupt)
         except OSError:
@@ -195,7 +196,15 @@ def load_config() -> dict:
         if CONFIG_BAK.exists():
             try:
                 with open(CONFIG_BAK) as f:
-                    return json.load(f)
+                    data = json.load(f)
+                # Repair the on-disk config from the backup so the file is valid
+                # again. Without this the corrupt file stays in place and the next
+                # save_config would copy it over the last-good .bak, destroying it.
+                try:
+                    shutil.copy2(str(CONFIG_BAK), str(CONFIG_FILE))
+                except OSError:
+                    pass
+                return data
             except Exception:
                 pass
     return {"scripts": [], "groups": []}

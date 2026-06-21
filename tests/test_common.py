@@ -1,4 +1,5 @@
 """Tests for the GTK-free helpers in common.py (run anywhere, no display needed)."""
+import json
 import os
 import time
 
@@ -146,6 +147,11 @@ def test_load_config_corrupt_preserves_and_recovers_from_bak(tmp_path, monkeypat
     assert recovered["scripts"][0]["id"] == "good"
     # Corrupt file was preserved aside, not silently discarded.
     assert list(tmp_path.glob(".lazylauncher-config.corrupt-*.json")) != []
+    # Recovery repaired the on-disk config from .bak, so a later save_config does
+    # NOT copy the (formerly corrupt) file over the last-good backup.
+    assert json.loads(cfg.read_text())["scripts"][0]["id"] == "good"
+    common.save_config({"scripts": [{"id": "new"}], "groups": []})
+    assert json.loads(bak.read_text())["scripts"][0]["id"] == "good"
 
 
 def test_run_state_lock_acquire_release(tmp_path, monkeypatch):
