@@ -606,6 +606,9 @@ class ManagerWindow(Gtk.ApplicationWindow):
             on_stop_group=self._home_stop_group,
             on_edit_script=self._home_edit_script,
             on_edit_group_name=self._home_edit_group_name,
+            on_restart_script=self._home_restart_script,
+            on_terminal_script=self._home_terminal_script,
+            on_restart_group=self._home_restart_group,
         )
         self.outer_stack.add_named(self.home_view, "home")
         self.outer_stack.add_named(hpaned, "detail")
@@ -937,6 +940,7 @@ class ManagerWindow(Gtk.ApplicationWindow):
             self._last_error_state = new_errors
             self._last_running_state = new_running
             self._refresh_running_badges()
+            self.home_view.refresh_running(new_running)
             if self._sidebar_mode == "groups":
                 self._rebuild_groups_view()
             if self.right_stack.get_visible_child_name() == "group":
@@ -1422,6 +1426,21 @@ class ManagerWindow(Gtk.ApplicationWindow):
         script = self._find_script(script_id)
         if script:
             self._stop_single_script(script)
+
+    def _home_restart_script(self, script_id):
+        script = self._find_script(script_id)
+        if script:
+            self._restart_script(script)
+
+    def _home_terminal_script(self, script_id):
+        script = self._find_script(script_id)
+        if script:
+            self._open_terminal(script)
+
+    def _home_restart_group(self, group_id):
+        group = self._find_group(group_id)
+        if group:
+            self._restart_group(group)
 
     def _home_run_group(self, group_id):
         group = self._find_group(group_id)

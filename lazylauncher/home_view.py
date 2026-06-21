@@ -8,11 +8,14 @@ persistence are delegated to the manager via the callbacks passed to __init__.
 """
 import gi
 gi.require_version("Gtk", "3.0")
-from gi.repository import Gtk, Pango
+from gi.repository import Gtk, Gdk, Pango
 
-from .common import load_config
+from .common import load_config, get_running_ids
 from .sorting import port_sort_key
 from .ui_shared import make_tab_button
+
+# The running play icon is tinted with the same green the sidebar uses.
+_RUNNING_GREEN = "#27ae60"
 
 
 class HomeView(Gtk.Box):
@@ -35,10 +38,13 @@ class HomeView(Gtk.Box):
         _HOME_G_COL_WD: "working_dir",
     }
 
-    # Per-row action icons shared by both home tables (title, icon, key).
+    # Per-row action icons shared by both home tables (title, icon, key). Icons
+    # mirror the sidebar's button set so the two views stay recognisable.
     _HOME_ACTIONS = [
         ("Run", "media-playback-start-symbolic", "run"),
         ("Stop", "media-playback-stop-symbolic", "stop"),
+        ("Restart", "view-refresh-symbolic", "restart"),
+        ("Terminal", "utilities-terminal-symbolic", "terminal"),
         ("Settings", "emblem-system-symbolic", "settings"),
         ("Logs", "text-x-generic-symbolic", "logs"),
         ("Env", "dialog-password-symbolic", "envs"),
@@ -46,7 +52,8 @@ class HomeView(Gtk.Box):
 
     def __init__(self, *, on_open_script, on_open_group, on_new_script,
                  on_new_group, on_run_script, on_stop_script, on_run_group,
-                 on_stop_group, on_edit_script, on_edit_group_name):
+                 on_stop_group, on_edit_script, on_edit_group_name,
+                 on_restart_script, on_terminal_script, on_restart_group):
         super().__init__(orientation=Gtk.Orientation.VERTICAL)
         self.get_style_context().add_class("home-table")
         self._on_open_script = on_open_script
@@ -59,6 +66,13 @@ class HomeView(Gtk.Box):
         self._on_stop_group = on_stop_group
         self._on_edit_script = on_edit_script
         self._on_edit_group_name = on_edit_group_name
+        self._on_restart_script = on_restart_script
+        self._on_terminal_script = on_terminal_script
+        self._on_restart_group = on_restart_group
+        # Ids of currently-running scripts; drives the green run icon. Refreshed
+        # by reload_*/refresh_running.
+        self._running_ids = set()
+        self._green_run_pix = False  # lazy-built cache (None once a build fails)
 
         # Sub-tabs: Scripts | Groups (same pattern as the editor sidebar)
         self._home_mode = "scripts"
@@ -127,7 +141,8 @@ class HomeView(Gtk.Box):
             tree.append_column(column)
 
     def _append_action_column(self, tree, title, icon_name):
-        """Add a fixed-width clickable icon column to a home table."""
+        """Add a fixed-width clickable icon column to a home table. Returns
+        (column, renderer) so callers can attach a cell-data func."""
         renderer = Gtk.CellRendererPixbuf()
         renderer.set_property("icon-name", icon_name)
         renderer.set_alignment(0.5, 0.5)
@@ -138,16 +153,71 @@ class HomeView(Gtk.Box):
         column.set_min_width(56)
         column.set_fixed_width(64)
         tree.append_column(column)
-        return column
+        return column, renderer
 
-    def _add_action_columns(self, tree, on_click):
+    def _add_action_columns(self, tree, on_click, is_running):
         """Append the shared per-row action icon columns to a home table and
-        wire its button-press handler. Returns the {column: key} map."""
+        wire its button-press handler. ``is_running(model, iter)`` decides when a
+        row's run icon turns green. Returns the {column: key} map."""
         action_columns = {}
         for title, icon, key in self._HOME_ACTIONS:
-            action_columns[self._append_action_column(tree, title, icon)] = key
+            column, renderer = self._append_action_column(tree, title, icon)
+            action_columns[column] = key
+            if key == "run":
+                column.set_cell_data_func(renderer, self._run_cell_data, is_running)
         tree.connect("button-press-event", on_click)
         return action_columns
+
+    # -- running indicator (green run icon) --------------------------------------
+
+    def _green_run_pixbuf(self):
+        """Lazily build (and cache) the green-tinted play icon; None on failure."""
+        if self._green_run_pix is not False:
+            return self._green_run_pix
+        self._green_run_pix = None
+        info = Gtk.IconTheme.get_default().lookup_icon(
+            "media-playback-start-symbolic", 16, 0)
+        if info is not None:
+            color = Gdk.RGBA()
+            color.parse(_RUNNING_GREEN)
+            try:
+                self._green_run_pix, _ = info.load_symbolic(color, None, None, None)
+            except Exception:
+                self._green_run_pix = None
+        return self._green_run_pix
+
+    def _run_cell_data(self, _column, cell, model, it, is_running):
+        """Paint the run icon green for running rows, plain otherwise."""
+        if is_running(model, it):
+            cell.set_property("pixbuf", self._green_run_pixbuf())
+        else:
+            cell.set_property("pixbuf", None)
+            cell.set_property("icon-name", "media-playback-start-symbolic")
+
+    def _script_row_running(self, model, it):
+        return model[it][self._HOME_COL_ID] in self._running_ids
+
+    def _group_row_running(self, model, it):
+        """A script row is running by id; a group row is 'running' if any of its
+        member scripts are (matching the sidebar's group run badge)."""
+        row = model[it]
+        if row[self._HOME_G_COL_KIND] == "script":
+            return row[self._HOME_G_COL_ID] in self._running_ids
+        child = model.iter_children(it)
+        while child is not None:
+            if model[child][self._HOME_G_COL_ID] in self._running_ids:
+                return True
+            child = model.iter_next(child)
+        return False
+
+    def refresh_running(self, running_ids):
+        """Update the cached running set and repaint the run icons in place
+        (no model rebuild, so selection/scroll are preserved)."""
+        self._running_ids = set(running_ids)
+        for tree_attr in ("home_tree", "home_groups_tree"):
+            tree = getattr(self, tree_attr, None)
+            if tree is not None:
+                tree.queue_draw()
 
     def _set_port_sort(self, store, col):
         """Sort a home table's port column numerically (blank/non-numeric = 0)."""
@@ -178,7 +248,7 @@ class HomeView(Gtk.Box):
         ], self._home_cell_edited)
         # Per-row action icons — discoverable access to a script's config.
         self._home_action_columns = self._add_action_columns(
-            self.home_tree, self._home_tree_button_press)
+            self.home_tree, self._home_tree_button_press, self._script_row_running)
 
         scroll = Gtk.ScrolledWindow()
         scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
@@ -209,10 +279,11 @@ class HomeView(Gtk.Box):
             ("Command", self._HOME_G_COL_CMD, 320, True),
             ("Working directory", self._HOME_G_COL_WD, 280, True),
         ], self._home_group_cell_edited)
-        # Same action set as the scripts table; on group rows run/stop/settings
-        # act on the whole group while logs/env are no-ops.
+        # Same action set as the scripts table; on group rows run/stop/restart/
+        # settings act on the whole group while terminal/logs/env are no-ops.
         self._home_group_action_columns = self._add_action_columns(
-            self.home_groups_tree, self._home_groups_tree_button_press)
+            self.home_groups_tree, self._home_groups_tree_button_press,
+            self._group_row_running)
 
         scroll = Gtk.ScrolledWindow()
         scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
@@ -264,6 +335,7 @@ class HomeView(Gtk.Box):
     def reload_table(self, *_):
         if not hasattr(self, "home_store"):
             return
+        self._running_ids = get_running_ids()
         query = self.home_search_entry.get_text().lower()
         self.home_store.clear()
         for s in load_config().get("scripts", []):
@@ -280,6 +352,7 @@ class HomeView(Gtk.Box):
     def reload_groups(self, *_):
         if not hasattr(self, "home_groups_store"):
             return
+        self._running_ids = get_running_ids()
         query = self.home_groups_search_entry.get_text().lower()
         cfg = load_config()
         scripts = cfg.get("scripts", [])
@@ -364,14 +437,25 @@ class HomeView(Gtk.Box):
         return True
 
     def _home_script_action(self, key, script_id):
-        if key in ("run", "stop"):
-            (self._on_run_script if key == "run" else self._on_stop_script)(script_id)
+        direct = {
+            "run": self._on_run_script,
+            "stop": self._on_stop_script,
+            "restart": self._on_restart_script,
+            "terminal": self._on_terminal_script,
+        }
+        if key in direct:
+            direct[key](script_id)
         else:
             self._on_open_script(script_id, {"settings": 0, "logs": 1, "envs": 2}[key])
 
     def _home_group_action(self, key, group_id):
-        # run/stop/settings act on the whole group; logs/env are n/a for groups.
+        # run/stop/restart/settings act on the whole group; terminal/logs/env
+        # are n/a for groups.
         if key == "settings":
             self._on_open_group(group_id)
-        elif key in ("run", "stop"):
-            (self._on_run_group if key == "run" else self._on_stop_group)(group_id)
+        elif key == "run":
+            self._on_run_group(group_id)
+        elif key == "stop":
+            self._on_stop_group(group_id)
+        elif key == "restart":
+            self._on_restart_group(group_id)
