@@ -95,6 +95,23 @@ def test_parse_env_vars_blocks_dangerous_and_keeps_safe():
     assert "HOME" in env   # inherits the real environment
 
 
+def test_parse_env_vars_resolves_global_reference():
+    env = runner._parse_env_vars([{"key": "API", "global": True}],
+                                 {"API": "https://x"})
+    assert env["API"] == "https://x"
+
+
+def test_parse_env_vars_orphan_reference_not_injected():
+    env = runner._parse_env_vars([{"key": "GONE", "global": True}], {})
+    assert "GONE" not in env
+
+
+def test_parse_env_vars_blocklist_applies_to_resolved_global():
+    # A pool entry named PATH must still be filtered after resolution.
+    env = runner._parse_env_vars([{"key": "PATH", "global": True}], {"PATH": "/evil"})
+    assert env.get("PATH") != "/evil"
+
+
 # -- _mark_running: phantom-PID guard (the run_state write path) ---------------
 
 def test_mark_running_rejects_pid_zero(monkeypatch, tmp_path):

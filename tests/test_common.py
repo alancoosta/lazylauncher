@@ -30,6 +30,36 @@ def test_normalize_garbage_type():
     assert common.normalize_env_vars(123) == []
 
 
+def test_normalize_preserves_global_marker():
+    # A live reference keeps the marker and drops any value.
+    assert common.normalize_env_vars([{"key": "A", "global": True, "value": "ignored"}]) == [
+        {"key": "A", "global": True}]
+
+
+# -- global_env_map / resolve_env_vars ---------------------------------------
+
+def test_global_env_map_from_cfg():
+    cfg = {"global_env": [{"key": "API", "value": "https://x"}, {"key": "  ", "value": "skip"}]}
+    assert common.global_env_map(cfg) == {"API": "https://x"}
+
+
+def test_resolve_reference_pulls_from_pool():
+    items = [{"key": "API", "global": True}]
+    assert common.resolve_env_vars(items, {"API": "https://x"}) == [
+        {"key": "API", "value": "https://x"}]
+
+
+def test_resolve_orphan_reference_dropped():
+    # A reference whose key is gone from the pool is simply not injected.
+    assert common.resolve_env_vars([{"key": "GONE", "global": True}], {}) == []
+
+
+def test_resolve_own_value_passthrough_and_mix():
+    items = [{"key": "API", "global": True}, {"key": "LOCAL", "value": "1"}]
+    assert common.resolve_env_vars(items, {"API": "https://x"}) == [
+        {"key": "API", "value": "https://x"}, {"key": "LOCAL", "value": "1"}]
+
+
 # -- ui_state (last-used tab) -------------------------------------------------
 
 def _patch_ui_state(monkeypatch, tmp_path):
@@ -150,7 +180,7 @@ def test_load_config_missing_returns_seed(tmp_path, monkeypatch):
     monkeypatch.setattr(common, "CONFIG_DIR", tmp_path)
     monkeypatch.setattr(common, "CONFIG_FILE", tmp_path / "cfg.json")
     monkeypatch.setattr(common, "CONFIG_BAK", tmp_path / "cfg.json.bak")
-    assert common.load_config() == {"scripts": [], "groups": []}
+    assert common.load_config() == {"scripts": [], "groups": [], "global_env": []}
 
 
 def test_save_config_keeps_backup(tmp_path, monkeypatch):

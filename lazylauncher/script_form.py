@@ -6,7 +6,9 @@ import gi
 gi.require_version("Gtk", "3.0")
 from gi.repository import Gtk
 
-from .common import load_config
+from .common import (
+    load_config, save_config, config_lock, global_env_map, CONFIG_FILE,
+)
 from .env_table import EnvVarsTable
 from .log_panel import LogPanel
 from .ui_shared import _STOP_LABEL
@@ -331,12 +333,12 @@ class ScriptForm(Gtk.Box):
         env_lbl = Gtk.Label(label="ENV VARS")
         env_lbl.set_halign(Gtk.Align.START)
         env_lbl.get_style_context().add_class("form-label")
-        env_hint = Gtk.Label(label="One KEY / value pair per row")
+        env_hint = Gtk.Label(label="One KEY / value per row — type a global key to reuse it")
         env_hint.set_halign(Gtk.Align.START)
         env_hint.get_style_context().add_class("form-hint")
         env_header.pack_start(env_lbl, False, False, 0)
         env_header.pack_start(env_hint, False, False, 0)
-        self.env_entry = EnvVarsTable()
+        self.env_entry = EnvVarsTable(on_promote=self._promote_to_global)
         self.env_entry.set_hexpand(True)
         env_inner.pack_start(env_header, False, False, 0)
         env_spacer = Gtk.Box(); env_spacer.set_size_request(-1, 8)
@@ -369,6 +371,7 @@ class ScriptForm(Gtk.Box):
         self.wd_entry.set_text(script.get("working_dir", str(Path.home())))
         self.pin_switch.set_active(script.get("pinned_icon", False))
         self.enabled_switch.set_active(script.get("enabled", True))
+        self.env_entry.set_global_pool(global_env_map())
         self.env_entry.set_env_vars(script.get("env_vars", ""))
         self.port_entry.set_text(script.get("port", ""))
         self.confirm_switch.set_active(script.get("confirm", False))
@@ -387,6 +390,14 @@ class ScriptForm(Gtk.Box):
     def clear(self):
         self._script = None
         self.set_sensitive(False)
+
+    def refresh_global_pool(self):
+        """Re-inject the global pool so references / autocomplete stay current.
+
+        Called after the pool changes elsewhere (e.g. the Global tab). Updating
+        the pool re-evaluates each row's reference state without emitting a save.
+        """
+        self.env_entry.set_global_pool(global_env_map())
 
     def _rebuild_group_checkboxes(self):
         for child in self._groups_box.get_children():
@@ -492,6 +503,31 @@ class ScriptForm(Gtk.Box):
             "login_shell": self.login_shell_switch.get_active(),
         }
         self._on_run(temp_script)
+
+    def _promote_to_global(self, key, value):
+        """Add a script var to the global pool, then re-inject the pool.
+
+        The env table marks the row as a live reference before calling us; we
+        persist the value into ``config["global_env"]`` (creating or updating
+        the entry), touch the config so the tray hot-reloads, and refresh the
+        table so the locked value shows immediately.
+        """
+        with config_lock():
+            cfg = load_config()
+            pool = cfg.get("global_env") or []
+            for item in pool:
+                if isinstance(item, dict) and str(item.get("key", "")).strip() == key:
+                    item["value"] = value
+                    break
+            else:
+                pool.append({"key": key, "value": value})
+            cfg["global_env"] = pool
+            save_config(cfg)
+        try:
+            CONFIG_FILE.touch()
+        except OSError:
+            pass
+        self.env_entry.set_global_pool(global_env_map())
 
     def _browse_dir(self, _widget):
         dialog = Gtk.FileChooserDialog(

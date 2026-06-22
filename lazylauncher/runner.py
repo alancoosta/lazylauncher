@@ -27,7 +27,8 @@ from .common import (
     _safe_write, config_lock, run_state_lock, load_config, save_config,
     get_running_ids, find_script_pid,
     _get_pid_start_time, _is_pid_alive, _mark_stopped,
-    rotate_log, log_path, normalize_env_vars, get_logger,
+    rotate_log, log_path, resolve_env_vars,
+    global_env_map, get_logger,
 )
 
 
@@ -73,14 +74,17 @@ def _kill_safe(fn, *args):
         pass
 
 
-def _parse_env_vars(raw_env) -> dict:
+def _parse_env_vars(raw_env, global_map=None) -> dict:
     """Build the runtime environment, dropping dangerous keys.
 
     ``raw_env`` may be the new list-of-dicts format or a legacy
-    space-separated ``KEY=VALUE`` string; both are normalized.
+    space-separated ``KEY=VALUE`` string; both are normalized. Live references
+    to the global pool (``{"key","global":True}``) are resolved against
+    ``global_map``. The block-list is applied to the *resolved* keys, so a
+    pool entry named ``PATH`` etc. is still filtered out.
     """
     env = os.environ.copy()
-    for item in normalize_env_vars(raw_env):
+    for item in resolve_env_vars(raw_env, global_map or {}):
         if item["key"].upper() not in _BLOCKED_ENV_KEYS:
             env[item["key"]] = item["value"]
     return env
@@ -328,7 +332,7 @@ def run_script(script: dict):
             return
 
     cwd = str(Path(cwd).expanduser())
-    env = _parse_env_vars(script.get("env_vars", ""))
+    env = _parse_env_vars(script.get("env_vars", ""), global_env_map())
     login_shell = script.get("login_shell", True)
 
     if silent:

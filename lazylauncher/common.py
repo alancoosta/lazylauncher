@@ -175,6 +175,10 @@ def normalize_env_vars(raw) -> list:
     ``=`` are dropped, mirroring the old runtime parser). Entries with an
     empty key are skipped. Keys are stripped; values are preserved as-is so
     they may contain spaces.
+
+    A dict item with a truthy ``global`` flag is a *live reference* to the
+    global pool and is preserved as ``{"key": K, "global": True}`` (no value);
+    its value is resolved at launch time by :func:`resolve_env_vars`.
     """
     result = []
     if isinstance(raw, list):
@@ -182,7 +186,11 @@ def normalize_env_vars(raw) -> list:
             if not isinstance(item, dict):
                 continue
             key = str(item.get("key", "")).strip()
-            if key:
+            if not key:
+                continue
+            if item.get("global"):
+                result.append({"key": key, "global": True})
+            else:
                 result.append({"key": key, "value": str(item.get("value", ""))})
     elif isinstance(raw, str):
         for token in raw.split():
@@ -191,6 +199,35 @@ def normalize_env_vars(raw) -> list:
                 key = key.strip()
                 if key:
                     result.append({"key": key, "value": value})
+    return result
+
+
+def global_env_map(cfg=None) -> dict:
+    """Return the global env pool as a plain ``{key: value}`` dict.
+
+    Reads ``config["global_env"]`` (loading the config if ``cfg`` is omitted).
+    """
+    if cfg is None:
+        cfg = load_config()
+    return {it["key"]: it.get("value", "")
+            for it in normalize_env_vars(cfg.get("global_env"))}
+
+
+def resolve_env_vars(items, global_map) -> list:
+    """Resolve a script's ``env_vars`` against the global pool.
+
+    ``items`` may contain own values (``{"key","value"}``) and live references
+    to the pool (``{"key","global":True}``). Returns a fully-resolved list of
+    ``{"key","value"}`` dicts. A reference whose key is no longer in the pool is
+    dropped (the variable is simply not injected).
+    """
+    result = []
+    for item in normalize_env_vars(items):
+        if item.get("global"):
+            if item["key"] in global_map:
+                result.append({"key": item["key"], "value": global_map[item["key"]]})
+        else:
+            result.append({"key": item["key"], "value": item.get("value", "")})
     return result
 
 
@@ -204,7 +241,7 @@ def load_config() -> dict:
     fresh seed.
     """
     if not CONFIG_FILE.exists():
-        return {"scripts": [], "groups": []}
+        return {"scripts": [], "groups": [], "global_env": []}
     try:
         with open(CONFIG_FILE) as f:
             return json.load(f)
@@ -231,7 +268,7 @@ def load_config() -> dict:
                 return data
             except Exception:
                 pass
-    return {"scripts": [], "groups": []}
+    return {"scripts": [], "groups": [], "global_env": []}
 
 
 def save_config(cfg: dict):
@@ -278,6 +315,7 @@ def ensure_seed_config():
             {"id": "example-dev", "name": "Dev environment",
              "description": "Example group — edit or delete me."},
         ],
+        "global_env": [],
     }
     save_config(cfg)
 

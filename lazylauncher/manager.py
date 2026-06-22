@@ -17,7 +17,7 @@ from pathlib import Path
 
 from .common import (
     CONFIG_FILE,
-    config_lock, load_config, save_config,
+    config_lock, load_config, save_config, global_env_map,
     get_error_states, get_running_ids, find_script_pid,
     _is_pid_alive, _mark_stopped,
     migrate_state, ensure_seed_config,
@@ -41,6 +41,7 @@ from .ui_shared import (
 )
 from .rows import ScriptRow, GroupRow
 from .home_view import HomeView
+from .env_table import EnvVarsTable
 from .script_form import ScriptForm
 from .group_form import GroupForm
 
@@ -276,6 +277,15 @@ headerbar .subtitle {
     font-size: 11px;
     opacity: 0.45;
     margin-top: 2px;
+}
+entry.env-ref {
+    opacity: 0.6;
+    font-style: italic;
+}
+entry.env-ref-missing {
+    opacity: 0.7;
+    font-style: italic;
+    color: #d08770;
 }
 .section-header {
     font-size: 10px;
@@ -584,8 +594,15 @@ class ManagerWindow(Gtk.ApplicationWindow):
         self.tab_groups_btn.get_style_context().add_class("group-tab")
         self.tab_groups_btn.connect("toggled", lambda b: self._on_tab_toggled(b, "groups"))
 
+        self.tab_global_btn = Gtk.ToggleButton(label="Global")
+        self.tab_global_btn.set_mode(False)
+        self.tab_global_btn.get_style_context().add_class("group-tab")
+        self.tab_global_btn.set_tooltip_text("Shared env vars reused across scripts")
+        self.tab_global_btn.connect("toggled", lambda b: self._on_tab_toggled(b, "global"))
+
         tab_bar.pack_start(self.tab_all_btn, True, True, 0)
         tab_bar.pack_start(self.tab_groups_btn, True, True, 0)
+        tab_bar.pack_start(self.tab_global_btn, True, True, 0)
         left_box.pack_start(tab_bar, False, False, 0)
 
         # Sidebar stack
@@ -596,6 +613,8 @@ class ManagerWindow(Gtk.ApplicationWindow):
         self.sidebar_stack.add_named(self._build_all_page(), "all")
 
         self.sidebar_stack.add_named(self._build_groups_page(), "groups")
+
+        self.sidebar_stack.add_named(self._build_global_sidebar_page(), "global")
 
         left_box.pack_start(self.sidebar_stack, True, True, 0)
 
@@ -935,7 +954,74 @@ class ManagerWindow(Gtk.ApplicationWindow):
         self.group_form.set_sensitive(False)
         self.right_stack.add_named(self.group_form, "group")
 
+        self.right_stack.add_named(self._build_global_editor(), "global")
+
         return self.right_stack
+
+    def _build_global_sidebar_page(self):
+        """Left page for the Global tab — just a short blurb; editing is on the right."""
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        page.set_margin_start(16)
+        page.set_margin_end(16)
+        page.set_margin_top(20)
+        title = Gtk.Label(label="GLOBAL ENV")
+        title.set_halign(Gtk.Align.START)
+        title.get_style_context().add_class("section-header")
+        blurb = Gtk.Label(
+            label="Variables defined here can be reused by any script. In a "
+                  "script's Envs tab, type a key listed here to reference it — "
+                  "edit the value once and every script that uses it follows.")
+        blurb.set_halign(Gtk.Align.START)
+        blurb.set_xalign(0)
+        blurb.set_line_wrap(True)
+        blurb.get_style_context().add_class("form-hint")
+        page.pack_start(title, False, False, 0)
+        page.pack_start(blurb, False, False, 0)
+        return page
+
+    def _build_global_editor(self):
+        """Right page for the Global tab — the global env key/value table."""
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        scroll = Gtk.ScrolledWindow()
+        scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scroll.set_hexpand(True)
+        scroll.set_vexpand(True)
+        inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        inner.set_margin_start(20)
+        inner.set_margin_end(20)
+        inner.set_margin_top(16)
+        inner.set_margin_bottom(20)
+
+        header = Gtk.Label(label="GLOBAL ENVIRONMENT")
+        header.set_halign(Gtk.Align.START)
+        header.get_style_context().add_class("section-header")
+        inner.pack_start(header, False, False, 0)
+
+        self.global_env_table = EnvVarsTable()
+        self.global_env_table.set_hexpand(True)
+        self.global_env_table.connect("changed", lambda _: self._save_global_env())
+        inner.pack_start(self.global_env_table, False, False, 0)
+
+        scroll.add(inner)
+        box.pack_start(scroll, True, True, 0)
+        return box
+
+    def _save_global_env(self):
+        """Persist the global env pool and make the change visible everywhere.
+
+        Saves under the config lock, touches the config so the tray hot-reloads,
+        and re-injects the pool into the open script form so its references and
+        autocomplete reflect the new pool immediately.
+        """
+        with config_lock():
+            cfg = load_config()
+            cfg["global_env"] = self.global_env_table.get_env_vars()
+            save_config(cfg)
+        try:
+            CONFIG_FILE.touch()
+        except OSError:
+            pass
+        self.form.refresh_global_pool()
 
     def _toggle_log_search(self):
         if self.right_stack.get_visible_child_name() == "script":
@@ -1021,9 +1107,13 @@ class ManagerWindow(Gtk.ApplicationWindow):
         self._sidebar_mode = tab
         self.tab_all_btn.set_active(tab == "all")
         self.tab_groups_btn.set_active(tab == "groups")
+        self.tab_global_btn.set_active(tab == "global")
         self._switching_tab = False
         self.sidebar_stack.set_visible_child_name(tab)
-        if tab == "groups":
+        if tab == "global":
+            self.global_env_table.set_env_vars(load_config().get("global_env"))
+            self.right_stack.set_visible_child_name("global")
+        elif tab == "groups":
             self._rebuild_groups_view()
             if self._selected_group_id:
                 cfg = load_config()
