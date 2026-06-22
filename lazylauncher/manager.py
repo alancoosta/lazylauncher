@@ -41,6 +41,7 @@ from .ui_shared import (
 )
 from .rows import ScriptRow, GroupRow
 from .home_view import HomeView
+from .graph_view import GraphView
 from .env_table import EnvVarsTable
 from .script_form import ScriptForm
 from .group_form import GroupForm
@@ -639,14 +640,18 @@ class ManagerWindow(Gtk.ApplicationWindow):
             on_restart_group=self._home_restart_group,
             on_add_script_to_group=self._home_add_script_to_group,
         )
+        self.graph_view = GraphView()
+        self.graph_view.connect("script-activated",
+                                lambda _w, sid: self._home_open_script(sid))
         self.outer_stack.add_named(self.home_view, "home")
         self.outer_stack.add_named(hpaned, "detail")
+        self.outer_stack.add_named(self.graph_view, "graph")
         self.outer_stack.set_visible_child_name("home")
         self.outer_stack.connect("notify::visible-child", self._on_view_changed)
-        # Reopen on the last-used top-level view (Home/Editor). Done after the
+        # Reopen on the last-used top-level view (Home/Editor/Map). Done after the
         # signal is wired so _on_view_changed syncs the switch buttons.
         saved_view = load_ui_state().get("view")
-        if saved_view in ("home", "detail"):
+        if saved_view in ("home", "detail", "graph"):
             self.outer_stack.set_visible_child_name(saved_view)
 
         ScriptRow._on_run = self._run_script
@@ -712,8 +717,11 @@ class ManagerWindow(Gtk.ApplicationWindow):
         self._switching_view = False
         self.view_home_btn = make_tab_button("_Home", "home", self._on_view_toggled, active=True)
         self.view_editor_btn = make_tab_button("_Editor", "detail", self._on_view_toggled)
+        self.view_map_btn = make_tab_button("_Map", "graph", self._on_view_toggled)
+        self.view_map_btn.set_tooltip_text("Show how scripts connect via ports referenced in env vars")
         view_switch.pack_start(self.view_home_btn, False, False, 0)
         view_switch.pack_start(self.view_editor_btn, False, False, 0)
+        view_switch.pack_start(self.view_map_btn, False, False, 0)
         hb.set_custom_title(view_switch)
 
     def _build_all_page(self):
@@ -1042,6 +1050,8 @@ class ManagerWindow(Gtk.ApplicationWindow):
             self._last_running_state = new_running
             self._refresh_running_badges()
             self.home_view.refresh_running(new_running)
+            if self.outer_stack.get_visible_child_name() == "graph":
+                self.graph_view.refresh_running(new_running)
             if self._sidebar_mode == "groups":
                 self._rebuild_groups_view()
             if self.right_stack.get_visible_child_name() == "group":
@@ -1603,10 +1613,14 @@ class ManagerWindow(Gtk.ApplicationWindow):
         self._switching_view = True
         self.view_home_btn.set_active(name == "home")
         self.view_editor_btn.set_active(name == "detail")
+        self.view_map_btn.set_active(name == "graph")
         self._switching_view = False
         save_ui_state(view=name)
         if name == "home":
             self.home_view.reload_active()
+        elif name == "graph":
+            self.graph_view.reload(load_config(), get_running_ids())
+            self.graph_view.grab_canvas_focus()
 
     def _load_list(self):
         for row in self.listbox.get_children():
