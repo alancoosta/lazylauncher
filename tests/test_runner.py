@@ -200,3 +200,145 @@ def test_cleanup_stale_tempfiles_removes_only_old(tmp_path, monkeypatch):
     assert not old_sh.exists() and not old_pid.exists()
     assert fresh.exists()        # recent launcher left alone
     assert unrelated.exists()    # non-lazylauncher file untouched
+
+
+# -- run_script: decision branches (duplicate-run / port-kill / confirm) --------
+# These reach the branches the `no_side_effects` fixture hides: a real run_state
+# (so "already running" is detectable), an injectable prompter, and a neutered
+# kill/sleep so no real process is touched.
+
+class _FakePrompter:
+    """Records calls; returns whatever the test configured."""
+    def __init__(self):
+        self.duplicate_choice = "cancel"
+        self.confirm_result = True
+        self.calls = []
+
+    def confirm(self, title, message=""):
+        self.calls.append(("confirm", title))
+        return self.confirm_result
+
+    def duplicate_run(self, label, pid, ports):
+        self.calls.append(("duplicate", label, pid, tuple(ports)))
+        return self.duplicate_choice
+
+
+@pytest.fixture
+def launch_isolated(monkeypatch, tmp_path):
+    """Real run_state/config under tmp_path; fake subprocess + no sleeps."""
+    rs = tmp_path / "run_state.json"
+    cfg = tmp_path / "config.json"
+    cfg.write_text(json.dumps({"scripts": [], "groups": [], "global_env": []}))
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    for mod, name, val in [
+        (common, "RUN_STATE_FILE", rs), (runner, "RUN_STATE_FILE", rs),
+        (common, "RUN_LOCK_FILE", tmp_path / ".run.lock"),
+        (common, "STATE_DIR", tmp_path), (common, "CONFIG_FILE", cfg),
+        (common, "CONFIG_DIR", tmp_path), (common, "LOG_DIR", logs),
+    ]:
+        monkeypatch.setattr(mod, name, val)
+    rec = _PopenRec()
+    monkeypatch.setattr(runner.subprocess, "Popen", rec)
+    monkeypatch.setattr(runner.subprocess, "run",
+                        lambda *a, **k: types.SimpleNamespace(stdout="", stderr="", returncode=1))
+    monkeypatch.setattr(runner.time, "sleep", lambda *_: None)
+    monkeypatch.setattr(runner.threading, "Thread", _DummyThread)
+    prompter = _FakePrompter()
+    runner.set_prompter(prompter)
+    return types.SimpleNamespace(rec=rec, prompter=prompter)
+
+
+def _script(**over):
+    base = {"command": "echo hi", "silent": True, "working_dir": "/tmp",
+            "id": "s1", "name": "T", "login_shell": False, "env_vars": [],
+            "confirm": False, "port": ""}
+    base.update(over)
+    return base
+
+
+def test_run_script_duplicate_cancel_aborts(launch_isolated, monkeypatch):
+    monkeypatch.setattr(runner, "_kill_safe", lambda *a: None)
+    runner._mark_running("s1", os.getpid())          # already running
+    launch_isolated.prompter.duplicate_choice = "cancel"
+    runner.run_script(_script())
+    assert launch_isolated.rec.calls == []            # aborted: no launch
+    assert launch_isolated.prompter.calls[0][0] == "duplicate"
+
+
+def test_run_script_duplicate_another_proceeds(launch_isolated, monkeypatch):
+    monkeypatch.setattr(runner, "_kill_safe", lambda *a: None)
+    runner._mark_running("s1", os.getpid())
+    launch_isolated.prompter.duplicate_choice = "another"
+    runner.run_script(_script())
+    assert len(launch_isolated.rec.calls) == 1        # launched a second instance
+
+
+def test_run_script_duplicate_restart_kills_and_relaunches(launch_isolated, monkeypatch):
+    killed = []
+    monkeypatch.setattr(runner, "_kill_safe", lambda fn, *a: killed.append(fn))
+    runner._mark_running("s1", os.getpid())
+    launch_isolated.prompter.duplicate_choice = "restart"
+    runner.run_script(_script())
+    assert len(launch_isolated.rec.calls) == 1        # relaunched after kill
+    assert os.killpg in killed and os.kill in killed  # SIGTERM escalation attempted
+
+
+def test_run_script_confirm_denied_aborts(launch_isolated):
+    launch_isolated.prompter.confirm_result = False
+    runner.run_script(_script(confirm=True))
+    assert launch_isolated.rec.calls == []
+
+
+def test_run_script_port_in_use_aborts_when_declined(launch_isolated, monkeypatch):
+    monkeypatch.setattr(runner, "_is_port_in_use", lambda port: True)
+    monkeypatch.setattr(runner, "_process_on_port", lambda port: ("node", 1234))
+    launch_isolated.prompter.confirm_result = False
+    runner.run_script(_script(port="3000"))
+    assert launch_isolated.rec.calls == []
+    assert launch_isolated.prompter.calls[0] == ("confirm", "Kill node (PID 1234) on port :3000?")
+
+
+def test_run_script_port_in_use_proceeds_when_confirmed(launch_isolated, monkeypatch):
+    killed = []
+    monkeypatch.setattr(runner, "_is_port_in_use", lambda port: True)
+    monkeypatch.setattr(runner, "_process_on_port", lambda port: ("node", 1234))
+    monkeypatch.setattr(runner, "kill_port", lambda port: killed.append(port) or True)
+    launch_isolated.prompter.confirm_result = True
+    runner.run_script(_script(port="3000"))
+    assert len(launch_isolated.rec.calls) == 1
+    assert killed == [3000]
+
+
+# -- stop_script (consolidated: single source of truth for tray + manager) -----
+
+def test_stop_script_noop_on_untracked(monkeypatch, tmp_path):
+    rs = tmp_path / "run_state.json"
+    cfg = tmp_path / "config.json"
+    cfg.write_text(json.dumps({"scripts": [], "groups": [], "global_env": []}))
+    for mod, name, val in [(common, "RUN_STATE_FILE", rs), (runner, "RUN_STATE_FILE", rs),
+                           (common, "RUN_LOCK_FILE", tmp_path / ".run.lock"),
+                           (common, "STATE_DIR", tmp_path), (common, "CONFIG_FILE", cfg)]:
+        monkeypatch.setattr(mod, name, val)
+    runner.stop_script("nope")            # not tracked: must not raise
+    assert not rs.exists() or "nope" not in rs.read_text()
+
+
+def test_stop_script_kills_tracked_and_marks_stopped(monkeypatch, tmp_path):
+    rs = tmp_path / "run_state.json"
+    cfg = tmp_path / "config.json"
+    cfg.write_text(json.dumps({"scripts": [], "groups": [], "global_env": []}))
+    for mod, name, val in [(common, "RUN_STATE_FILE", rs), (runner, "RUN_STATE_FILE", rs),
+                           (common, "RUN_LOCK_FILE", tmp_path / ".run.lock"),
+                           (common, "STATE_DIR", tmp_path), (common, "CONFIG_FILE", cfg),
+                           (common, "LOG_DIR", tmp_path / "logs")]:
+        monkeypatch.setattr(mod, name, val)
+    (tmp_path / "logs").mkdir()
+    monkeypatch.setattr(runner.os, "kill", lambda *a: None)
+    monkeypatch.setattr(runner.os, "killpg", lambda *a: None)
+    monkeypatch.setattr(runner.os, "getpgid", lambda pid: pid)
+    monkeypatch.setattr(runner.time, "sleep", lambda *_: None)
+    runner._mark_running("s1", os.getpid())
+    assert "s1" in json.loads(rs.read_text())
+    runner.stop_script("s1")
+    assert "s1" not in json.loads(rs.read_text())   # marked stopped

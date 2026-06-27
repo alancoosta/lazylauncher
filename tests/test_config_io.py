@@ -36,6 +36,17 @@ def test_merge_into_empty_config():
     assert out["scripts"] == [{"id": "x"}]
 
 
+def test_merge_skips_entries_without_id():
+    # A malformed imported entry (no id) is skipped, not a KeyError crash.
+    cfg = {"scripts": [{"id": "a"}], "groups": [{"id": "g1"}]}
+    imported = {"scripts": [{"name": "no id"}, {"id": "b"}],
+                "groups": [{"name": "no id"}, {"id": "g2"}]}
+    out, added = config_io.merge_imported(cfg, imported)
+    assert added == 1
+    assert [s["id"] for s in out["scripts"]] == ["a", "b"]
+    assert [g["id"] for g in out["groups"]] == ["g1", "g2"]
+
+
 def test_read_config_file(tmp_path):
     p = tmp_path / "c.json"
     p.write_text(json.dumps({"scripts": [{"id": "z"}], "groups": []}))

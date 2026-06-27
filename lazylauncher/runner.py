@@ -482,7 +482,8 @@ def _mark_running(script_id: str, pid: int):
             state[script_id] = {"pid": pid, "start_time": _get_pid_start_time(pid)}
             _safe_write(RUN_STATE_FILE, json.dumps(state))
     except Exception:
-        pass
+        get_logger().warning(
+            "Failed to record run state for %s", script_id, exc_info=True)
     # Auto-detect port if not configured
     cfg = load_config()
     for s in cfg.get("scripts", []):
@@ -493,11 +494,12 @@ def _mark_running(script_id: str, pid: int):
             break
 
 
-def _stop_script(script_id: str):
+def stop_script(script_id: str):
     """Terminate a tracked script by its process group, then mark it stopped.
 
     Escalates SIGTERM -> SIGKILL after a short grace period so a process that
-    traps or ignores SIGTERM still dies, matching the manager's stop_script.
+    traps or ignores SIGTERM still dies. The single source of truth for stopping
+    a script (used by both the manager and the tray).
     """
     pid = find_script_pid(script_id)
     if pid:

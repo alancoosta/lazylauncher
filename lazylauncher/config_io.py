@@ -23,15 +23,17 @@ def merge_imported(cfg: dict, imported: dict):
     Entries whose id already exists in ``cfg`` are skipped. ``cfg`` is mutated in
     place and also returned, alongside the number of scripts actually added.
     """
-    existing_ids = {s["id"] for s in cfg.get("scripts", [])}
+    existing_ids = {s.get("id") for s in cfg.get("scripts", [])}
     added = 0
     for s in imported.get("scripts", []):
-        if s.get("id") not in existing_ids:
+        sid = s.get("id")
+        if sid is not None and sid not in existing_ids:
             cfg.setdefault("scripts", []).append(s)
             added += 1
-    existing_gids = {g["id"] for g in cfg.get("groups", [])}
+    existing_gids = {g.get("id") for g in cfg.get("groups", [])}
     for g in imported.get("groups", []):
-        if g.get("id") not in existing_gids:
+        gid = g.get("id")
+        if gid is not None and gid not in existing_gids:
             cfg.setdefault("groups", []).append(g)
     return cfg, added
 
