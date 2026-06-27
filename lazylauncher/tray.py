@@ -32,16 +32,10 @@ gi.require_version("Gtk", "3.0")
 from gi.repository import Gtk
 
 
-DEFAULT_ICON_PATH = str(Path(__file__).parent / "icons" / "logo.svg")
+from .ui_shared import GtkPrompter, resolve_app_icon
 
 
-_HICOLOR_ICON = Path.home() / ".local/share/icons/hicolor/scalable/apps/lazylauncher.svg"
-
-
-DEFAULT_ICON  = "lazylauncher" if _HICOLOR_ICON.exists() else DEFAULT_ICON_PATH
-
-
-from .ui_shared import GtkPrompter
+DEFAULT_ICON = resolve_app_icon() or str(Path(__file__).parent / "icons" / "logo.svg")
 
 
 _manager_proc = None

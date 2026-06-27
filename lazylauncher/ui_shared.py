@@ -79,6 +79,20 @@ def _is_dark_theme():
     return luminance < 0.5
 
 
+def resolve_app_icon():
+    """Icon to represent the app: ``"lazylauncher"`` (themed icon name) if a copy
+    is installed under hicolor, else the bundled ``logo.svg`` path, else None.
+
+    Shared by the manager (window icon) and the tray (indicator icon) so the
+    hicolor-vs-bundled heuristic lives in one place.
+    """
+    hicolor = Path.home() / ".local/share/icons/hicolor/scalable/apps/lazylauncher.svg"
+    if hicolor.exists():
+        return "lazylauncher"
+    logo = Path(__file__).parent / "icons" / "logo.svg"
+    return str(logo) if logo.exists() else None
+
+
 class GtkPrompter:
     """GTK3 implementation of runner's prompter protocol.
 

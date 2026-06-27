@@ -37,6 +37,7 @@ from .ui_shared import (
     _TIP_SORT_NAME_AZ, _TIP_SORT_NAME_ZA,
     _TIP_RUNNING_FIRST, _TIP_STOPPED_FIRST,
     _is_dark_theme, new_script, new_group, make_tab_button, GtkPrompter,
+    resolve_app_icon,
 )
 from .rows import ScriptRow, GroupRow
 from .home_view import HomeView
@@ -65,13 +66,11 @@ class ManagerWindow(Gtk.ApplicationWindow):
         self.set_resizable(True)
 
         # Window icon — prefer themed icon for crisp rendering
-        _hicolor = Path.home() / ".local/share/icons/hicolor/scalable/apps/lazylauncher.svg"
-        if _hicolor.exists():
-            self.set_icon_name("lazylauncher")
-        else:
-            logo_path = Path(__file__).parent / "icons" / "logo.svg"
-            if logo_path.exists():
-                self.set_icon_from_file(str(logo_path))
+        icon = resolve_app_icon()
+        if icon == "lazylauncher":
+            self.set_icon_name(icon)
+        elif icon:
+            self.set_icon_from_file(icon)
 
         # Set ANSI colors based on theme
         ansi.set_theme(_is_dark_theme())
