@@ -24,7 +24,10 @@ from .common import (
 )
 from .deps import run_group_ordered
 from .sorting import sort_scripts, sort_groups
-from .runner import set_prompter
+from .runner import (
+    set_prompter, run_script, stop_script, kill_port,
+    find_ports_for_pid, _is_port_in_use,
+)
 from . import ansi
 from .config_actions import ConfigActions
 
@@ -610,12 +613,10 @@ class ManagerWindow(Gtk.ApplicationWindow):
         port_str = cur.get("port", "").strip()
         port_busy = False
         if port_str and port_str.isdigit() and not is_running:
-            from .runner import _is_port_in_use
             port_busy = _is_port_in_use(int(port_str))
         self.form.stop_btn.set_sensitive(is_running or port_busy)
         self.form.restart_btn.set_sensitive(is_running)
         if is_running:
-            from .runner import find_ports_for_pid
             pid = find_script_pid(sid)
             ports = find_ports_for_pid(pid) if pid else []
             if ports:
@@ -866,7 +867,6 @@ class ManagerWindow(Gtk.ApplicationWindow):
     def _run_group(self, group):
         cfg = load_config()
         gid = group["id"]
-        from .runner import run_script
         group_scripts = scripts_in_group(cfg.get("scripts", []), gid)
         if not group_scripts:
             return
@@ -904,11 +904,10 @@ class ManagerWindow(Gtk.ApplicationWindow):
             if on_done:
                 GLib.idle_add(on_done)
             return
-        from .runner import stop_script as _runner_stop, kill_port
 
         def _work():
             for s in targets:
-                _runner_stop(s.get("id", ""))
+                stop_script(s.get("id", ""))
                 port_str = s.get("port", "").strip()
                 if port_str.isdigit():
                     kill_port(int(port_str))
@@ -938,7 +937,6 @@ class ManagerWindow(Gtk.ApplicationWindow):
             return
 
         def _relaunch():
-            from .runner import run_script
             for script in targets:
                 run_script(script)
             GLib.timeout_add(500, lambda: self._refresh_running_badges() and False)
@@ -1286,7 +1284,6 @@ class ManagerWindow(Gtk.ApplicationWindow):
     def _run_script(self, script: dict):
         if not script or not script.get("command", "").strip():
             return
-        from .runner import run_script
         run_script(script)
         # Refresh after a short delay so the process has time to register
         GLib.timeout_add(500, lambda: self._refresh_running_badges() and False)
