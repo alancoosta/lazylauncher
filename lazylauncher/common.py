@@ -284,6 +284,29 @@ def load_config() -> dict:
     return {"scripts": [], "groups": [], "global_env": []}
 
 
+def scripts_in_group(scripts, gid, only_enabled=True) -> list:
+    """Return the scripts that belong to group ``gid``.
+
+    Replaces the comprehension that was inlined across the manager and the
+    group form. ``only_enabled`` drops disabled scripts (the usual case for
+    run/stop/sort counts).
+    """
+    return [s for s in scripts
+            if gid in s.get("groups", [])
+            and (not only_enabled or s.get("enabled", True))]
+
+
+def normalize_script(script: dict) -> dict:
+    """Drop legacy keys no longer used (custom icon, pinned tray icon).
+
+    Shared by the editor's save path and any other writer so schema cleanup
+    lives in one place. Mutates and returns the dict.
+    """
+    script.pop("icon", None)
+    script.pop("pinned_icon", None)
+    return script
+
+
 def save_config(cfg: dict):
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     # Keep the previous good copy as a backup before overwriting, so a bad write

@@ -20,7 +20,7 @@ from .common import (
     config_lock, load_config, save_config, global_env_map,
     get_error_states, get_running_ids, find_script_pid,
     migrate_state, ensure_seed_config,
-    load_ui_state, save_ui_state,
+    load_ui_state, save_ui_state, scripts_in_group,
 )
 from .deps import run_group_ordered
 from .sorting import sort_scripts, sort_groups
@@ -701,7 +701,7 @@ class ManagerWindow(Gtk.ApplicationWindow):
         select_row = None
         for group in groups:
             gid = group["id"]
-            group_scripts = [s for s in scripts if gid in s.get("groups", []) and s.get("enabled", True)]
+            group_scripts = scripts_in_group(scripts, gid)
             row = GroupRow(group, group_scripts)
             self.groups_listbox.add(row)
             if gid == self._selected_group_id:
@@ -717,7 +717,7 @@ class ManagerWindow(Gtk.ApplicationWindow):
         cfg = load_config()
         scripts = cfg.get("scripts", [])
         running = get_running_ids()
-        group_scripts = [s for s in scripts if gid in s.get("groups", []) and s.get("enabled", True)]
+        group_scripts = scripts_in_group(scripts, gid)
 
         GroupRow._shared_running_ids = running
         GroupRow._on_run_group = self._run_group
@@ -859,10 +859,7 @@ class ManagerWindow(Gtk.ApplicationWindow):
         cfg = load_config()
         gid = group["id"]
         from .runner import run_script
-        group_scripts = [
-            s for s in cfg.get("scripts", [])
-            if gid in s.get("groups", []) and s.get("enabled", True)
-        ]
+        group_scripts = scripts_in_group(cfg.get("scripts", []), gid)
         if not group_scripts:
             return
         run_group_ordered(

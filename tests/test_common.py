@@ -266,3 +266,27 @@ def test_seed_only_when_absent(tmp_path, monkeypatch):
     cfg.write_text('{"scripts": [], "groups": []}')
     common.ensure_seed_config()
     assert cfg.read_text() == '{"scripts": [], "groups": []}'
+
+
+# -- scripts_in_group / normalize_script ---------------------------------------
+
+def test_scripts_in_group_filters_enabled():
+    scripts = [
+        {"id": "s1", "groups": ["g1"], "enabled": True},
+        {"id": "s2", "groups": ["g1"], "enabled": False},
+        {"id": "s3", "groups": ["g2"], "enabled": True},
+    ]
+    assert [s["id"] for s in common.scripts_in_group(scripts, "g1")] == ["s1"]
+
+
+def test_scripts_in_group_includes_disabled_when_asked():
+    scripts = [{"id": "s1", "groups": ["g1"], "enabled": False}]
+    out = common.scripts_in_group(scripts, "g1", only_enabled=False)
+    assert [s["id"] for s in out] == ["s1"]
+
+
+def test_normalize_script_drops_legacy_keys():
+    s = {"id": "x", "icon": "foo.png", "pinned_icon": True, "name": "X"}
+    out = common.normalize_script(s)
+    assert "icon" not in out and "pinned_icon" not in out
+    assert out["name"] == "X"

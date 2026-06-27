@@ -8,6 +8,7 @@ from gi.repository import Gtk, Pango
 
 from .common import (
     load_config, save_config, config_lock, global_env_map, CONFIG_FILE,
+    normalize_script,
 )
 from .env_table import EnvVarsTable
 from .log_panel import LogPanel
@@ -516,8 +517,7 @@ class ScriptForm(Gtk.Box):
         self._script["login_shell"] = self.login_shell_switch.get_active()
         self._script["depends_on"]  = [sid for sid, cb in self._dep_checkboxes.items() if cb.get_active()]
         self._script["groups"]      = [gid for gid, cb in self._group_checkboxes.items() if cb.get_active()]
-        self._script.pop("icon", None)  # custom-icon feature removed; drop stale data
-        self._script.pop("pinned_icon", None)  # pinned-tray-icon feature removed; drop stale data
+        normalize_script(self._script)  # drop legacy icon/pinned_icon fields
         self._on_save(self._script)
 
     def _run_current(self, _widget=None):

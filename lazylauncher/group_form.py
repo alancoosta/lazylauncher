@@ -4,7 +4,7 @@ import gi
 gi.require_version("Gtk", "3.0")
 from gi.repository import Gtk, Pango
 
-from .common import config_lock, load_config, save_config, get_running_ids
+from .common import config_lock, load_config, save_config, get_running_ids, scripts_in_group
 
 
 class GroupForm(Gtk.Box):
@@ -238,7 +238,7 @@ class GroupForm(Gtk.Box):
             running = get_running_ids()
         cfg = load_config()
         gid = self._group["id"]
-        group_scripts = [s for s in cfg.get("scripts", []) if gid in s.get("groups", []) and s.get("enabled", True)]
+        group_scripts = scripts_in_group(cfg.get("scripts", []), gid)
         any_running = any(s.get("id", "") in running for s in group_scripts)
         self.stop_btn.set_sensitive(any_running)
         self.restart_btn.set_sensitive(any_running)
