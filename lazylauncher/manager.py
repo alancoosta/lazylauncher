@@ -745,6 +745,12 @@ class ManagerWindow(Gtk.ApplicationWindow):
                 break
 
     def _group_row_selected(self, _listbox, row):
+        # A background rebuild (e.g. after stop/restart) re-selects the group to
+        # keep its highlight in the list; that must not yank the editor away from
+        # the script the user is viewing. Only follow the selection on the Groups
+        # sidebar.
+        if self._sidebar_mode != "groups":
+            return
         if row and isinstance(row, GroupRow):
             if row.group.get("id") != self._selected_group_id or self.right_stack.get_visible_child_name() != "group":
                 self._select_group(row.group)

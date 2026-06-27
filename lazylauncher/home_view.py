@@ -567,7 +567,7 @@ class HomeView(Gtk.Box):
         if key in direct:
             direct[key](script_id)
         else:
-            self._on_open_script(script_id, {"settings": 0, "logs": 1, "envs": 2}[key])
+            self._on_open_script(script_id, key)
 
     def _home_group_action(self, key, group_id):
         # run/stop/restart/settings act on the whole group; terminal/logs/env
