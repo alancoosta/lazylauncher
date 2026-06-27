@@ -26,7 +26,7 @@ from .deps import run_group_ordered
 from .sorting import sort_scripts, sort_groups
 from .runner import set_prompter
 from . import ansi
-from . import config_io
+from .config_actions import ConfigActions
 
 import gi
 gi.require_version("Gtk", "3.0")
@@ -92,6 +92,8 @@ class ManagerWindow(Gtk.ApplicationWindow):
             provider,
             Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
         )
+
+        self._config_actions = ConfigActions(self, self._load_list, self._show_toast)
 
         self._build_headerbar()
 
@@ -230,13 +232,13 @@ class ManagerWindow(Gtk.ApplicationWindow):
 
         menu = Gtk.Menu()
         import_item = Gtk.MenuItem(label="Import Scripts…")
-        import_item.connect("activate", self._import_config)
+        import_item.connect("activate", self._config_actions.import_config)
         menu.append(import_item)
         export_item = Gtk.MenuItem(label="Export Scripts…")
-        export_item.connect("activate", self._export_config)
+        export_item.connect("activate", self._config_actions.export_config)
         menu.append(export_item)
         open_cfg_item = Gtk.MenuItem(label="Open Config File")
-        open_cfg_item.connect("activate", self._open_config_file)
+        open_cfg_item.connect("activate", self._config_actions.open_config_file)
         menu.append(open_cfg_item)
         menu.append(Gtk.SeparatorMenuItem())
         reload_item = Gtk.MenuItem(label="Reload Tray")
@@ -1329,72 +1331,6 @@ class ManagerWindow(Gtk.ApplicationWindow):
             self.listbox.select_row(row)
             self.form.load_script(dup)
         self._show_toast("Script duplicated")
-
-    def _import_config(self, _widget=None):
-        dialog = Gtk.FileChooserDialog(
-            title="Import Scripts",
-            parent=self,
-            action=Gtk.FileChooserAction.OPEN,
-        )
-        dialog.add_buttons(Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL,
-                           Gtk.STOCK_OPEN, Gtk.ResponseType.OK)
-        f = Gtk.FileFilter()
-        f.set_name("JSON files")
-        f.add_pattern("*.json")
-        dialog.add_filter(f)
-        if dialog.run() == Gtk.ResponseType.OK:
-            path = dialog.get_filename()
-            dialog.destroy()
-            self._do_import(path)
-        else:
-            dialog.destroy()
-
-    def _do_import(self, path):
-        try:
-            imported = config_io.read_config_file(path)
-            if not imported.get("scripts"):
-                self._show_toast("No scripts found in file")
-                return
-            with config_lock():
-                cfg = load_config()
-                cfg, added = config_io.merge_imported(cfg, imported)
-                save_config(cfg)
-            self._load_list()
-            self._show_toast(f"Imported {added} script(s)")
-        except Exception as e:
-            self._show_toast(f"Import failed: {e}")
-
-    def _export_config(self, _widget=None):
-        dialog = Gtk.FileChooserDialog(
-            title="Export Scripts",
-            parent=self,
-            action=Gtk.FileChooserAction.SAVE,
-        )
-        dialog.add_buttons(Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL,
-                           Gtk.STOCK_SAVE, Gtk.ResponseType.OK)
-        dialog.set_current_name(".lazylauncher-config.json")
-        f = Gtk.FileFilter()
-        f.set_name("JSON files")
-        f.add_pattern("*.json")
-        dialog.add_filter(f)
-        if dialog.run() == Gtk.ResponseType.OK:
-            path = dialog.get_filename()
-            dialog.destroy()
-            try:
-                config_io.export_config_to(path)
-                self._show_toast(f"Exported to {Path(path).name}")
-            except Exception as e:
-                self._show_toast(f"Export failed: {e}")
-        else:
-            dialog.destroy()
-
-    def _open_config_file(self, _widget=None):
-        """Open the config file in the system's default application."""
-        try:
-            subprocess.Popen(["xdg-open", str(CONFIG_FILE)])
-            self._show_toast(f"Opening {CONFIG_FILE.name}")
-        except Exception as e:
-            self._show_toast(f"Could not open config: {e}")
 
     # -- group management ------------------------------------------------------
 
