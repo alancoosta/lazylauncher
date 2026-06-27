@@ -77,3 +77,43 @@ def _is_dark_theme():
     bg = style.get_background_color(Gtk.StateFlags.NORMAL)
     luminance = 0.299 * bg.red + 0.587 * bg.green + 0.114 * bg.blue
     return luminance < 0.5
+
+
+class GtkPrompter:
+    """GTK3 implementation of runner's prompter protocol.
+
+    The runner is GTK-free; both the manager and the tray install an instance so
+    the launch flow's confirm / duplicate-run dialogs render with GTK3.
+    """
+
+    def confirm(self, title, message=""):
+        d = Gtk.MessageDialog(
+            flags=Gtk.DialogFlags.MODAL, message_type=Gtk.MessageType.WARNING,
+            buttons=Gtk.ButtonsType.YES_NO, text=title)
+        if message:
+            d.format_secondary_text(message)
+        resp = d.run()
+        d.destroy()
+        return resp == Gtk.ResponseType.YES
+
+    def duplicate_run(self, label, pid, ports):
+        port_info = ""
+        if ports:
+            port_info = "\nListening on port(s): " + ", ".join(str(p) for p in ports)
+        d = Gtk.MessageDialog(
+            flags=Gtk.DialogFlags.MODAL, message_type=Gtk.MessageType.QUESTION,
+            buttons=Gtk.ButtonsType.NONE,
+            text=f"'{label}' is already running.{port_info}")
+        if pid:
+            d.format_secondary_text(f"PID: {pid}")
+        d.add_button("Cancel", Gtk.ResponseType.CANCEL)
+        d.add_button("Run Another", Gtk.ResponseType.YES)
+        kill_btn = d.add_button("Kill & Restart", Gtk.ResponseType.ACCEPT)
+        kill_btn.get_style_context().add_class("destructive-action")
+        resp = d.run()
+        d.destroy()
+        if resp == Gtk.ResponseType.ACCEPT:
+            return "restart"
+        if resp == Gtk.ResponseType.YES:
+            return "another"
+        return "cancel"

@@ -66,3 +66,40 @@ def test_input_not_mutated():
     before = [s["id"] for s in src]
     sorting.sort_scripts(src, "name_asc")
     assert [s["id"] for s in src] == before
+
+
+# -- sort_groups --------------------------------------------------------------
+
+def _groups_scripts():
+    # g1 has 2 enabled scripts (one running), g2 has 1, g3 has none
+    scripts = [
+        {"id": "s1", "groups": ["g1"], "enabled": True},
+        {"id": "s2", "groups": ["g1", "g2"], "enabled": True},
+        {"id": "s3", "groups": ["g3"], "enabled": False},
+    ]
+    groups = [{"id": "g1", "name": "Bravo"}, {"id": "g2", "name": "alpha"}, {"id": "g3", "name": "Charlie"}]
+    return groups, scripts
+
+
+def test_sort_groups_name_case_insensitive():
+    groups, _ = _groups_scripts()
+    out = sorting.sort_groups(groups, "name_asc")
+    assert [g["id"] for g in out] == ["g2", "g1", "g3"]   # alpha, Bravo, Charlie
+
+
+def test_sort_groups_by_enabled_count():
+    groups, scripts = _groups_scripts()
+    out = sorting.sort_groups(groups, "count_desc", scripts=scripts)
+    # g1=2, g2=1, g3=0 (disabled s3 doesn't count)
+    assert [g["id"] for g in out] == ["g1", "g2", "g3"]
+
+
+def test_sort_groups_running_first():
+    groups, scripts = _groups_scripts()
+    out = sorting.sort_groups(groups, "running_first", scripts=scripts, running_ids={"s1"})
+    assert out[0]["id"] == "g1"   # only g1 has a running script
+
+
+def test_sort_groups_unknown_mode_noop():
+    groups, _ = _groups_scripts()
+    assert sorting.sort_groups(groups, "bogus") == groups

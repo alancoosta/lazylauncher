@@ -8,9 +8,9 @@ The tray daemon hot-reloads that file automatically.
 """
 
 import os
-import signal
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -19,12 +19,11 @@ from .common import (
     CONFIG_FILE,
     config_lock, load_config, save_config, global_env_map,
     get_error_states, get_running_ids, find_script_pid,
-    _is_pid_alive, _mark_stopped,
     migrate_state, ensure_seed_config,
     load_ui_state, save_ui_state,
 )
 from .deps import run_group_ordered
-from .sorting import sort_scripts
+from .sorting import sort_scripts, sort_groups
 from .runner import set_prompter
 from . import ansi
 from . import config_io
@@ -37,7 +36,7 @@ from .ui_shared import (
     _STOP_LABEL,
     _TIP_SORT_NAME_AZ, _TIP_SORT_NAME_ZA,
     _TIP_RUNNING_FIRST, _TIP_STOPPED_FIRST,
-    _is_dark_theme, new_script, new_group, make_tab_button,
+    _is_dark_theme, new_script, new_group, make_tab_button, GtkPrompter,
 )
 from .rows import ScriptRow, GroupRow
 from .home_view import HomeView
@@ -47,483 +46,7 @@ from .script_form import ScriptForm
 from .group_form import GroupForm
 
 
-class _GtkPrompter:
-    """GTK3 implementation of runner's prompter protocol (used by the manager).
-
-    runner is GTK-free; the manager installs this so the launch flow's yes/no
-    dialogs render with the manager's toolkit.
-    """
-
-    def confirm(self, title, message=""):
-        d = Gtk.MessageDialog(
-            flags=Gtk.DialogFlags.MODAL, message_type=Gtk.MessageType.WARNING,
-            buttons=Gtk.ButtonsType.YES_NO, text=title)
-        if message:
-            d.format_secondary_text(message)
-        resp = d.run()
-        d.destroy()
-        return resp == Gtk.ResponseType.YES
-
-    def duplicate_run(self, label, pid, ports):
-        port_info = ""
-        if ports:
-            port_info = "\nListening on port(s): " + ", ".join(str(p) for p in ports)
-        d = Gtk.MessageDialog(
-            flags=Gtk.DialogFlags.MODAL, message_type=Gtk.MessageType.QUESTION,
-            buttons=Gtk.ButtonsType.NONE,
-            text=f"'{label}' is already running.{port_info}")
-        if pid:
-            d.format_secondary_text(f"PID: {pid}")
-        d.add_button("Cancel", Gtk.ResponseType.CANCEL)
-        d.add_button("Run Another", Gtk.ResponseType.YES)
-        kill_btn = d.add_button("Kill & Restart", Gtk.ResponseType.ACCEPT)
-        kill_btn.get_style_context().add_class("destructive-action")
-        resp = d.run()
-        d.destroy()
-        if resp == Gtk.ResponseType.ACCEPT:
-            return "restart"
-        if resp == Gtk.ResponseType.YES:
-            return "another"
-        return "cancel"
-
-
-def _find_all_script_pids(script_id: str) -> list[int]:
-    """Find ALL PIDs for a script by tracked state."""
-    pid = find_script_pid(script_id)
-    return [pid] if pid else []
-
-
-def _kill_safe(fn, *args):
-    """Call fn(*args) ignoring OSError (covers ProcessLookupError, PermissionError)."""
-    try:
-        fn(*args)
-    except OSError:
-        pass
-
-
-def stop_script(script_id: str) -> bool:
-    """Kill a running script and its entire process group. Returns True on success."""
-    pids = _find_all_script_pids(script_id)
-    if not pids:
-        _mark_stopped(script_id)
-        return False
-    # Collect all unique PGIDs
-    pgids = set()
-    for pid in pids:
-        try:
-            pgids.add(os.getpgid(pid))
-        except OSError:
-            pass
-    # SIGTERM all process groups + individual PIDs
-    for pgid in pgids:
-        _kill_safe(os.killpg, pgid, signal.SIGTERM)
-    for pid in pids:
-        _kill_safe(os.kill, pid, signal.SIGTERM)
-    time.sleep(0.5)
-    # SIGKILL any survivors
-    for pgid in pgids:
-        _kill_safe(os.killpg, pgid, signal.SIGKILL)
-    for pid in pids:
-        if _is_pid_alive(pid):
-            _kill_safe(os.kill, pid, signal.SIGKILL)
-    _mark_stopped(script_id)
-    return True
-
-
-CSS = """
-* {
-    font-family: 'Ubuntu', 'Cantarell', sans-serif;
-}
-
-/* -- headerbar -- */
-headerbar {
-    padding: 4px 10px;
-    min-height: 46px;
-}
-headerbar .title {
-    font-size: 14px;
-    font-weight: 700;
-}
-headerbar .subtitle {
-    font-size: 11px;
-    opacity: 0.6;
-}
-
-/* -- sidebar -- */
-#sidebar {
-    min-width: 230px;
-}
-#sidebar row {
-    padding: 11px 16px;
-}
-#sidebar row:selected {
-    background-color: @theme_base_color;
-    color: @theme_text_color;
-    border-left: 3px solid @theme_selected_bg_color;
-}
-#sidebar row:selected label {
-    color: @theme_text_color;
-}
-#sidebar row:selected image {
-    color: @theme_text_color;
-}
-#sidebar row:selected .badge-error,
-#sidebar row:selected .badge-running,
-#sidebar row:selected .badge-port,
-#sidebar row:selected .badge-pinned {
-    color: #ffffff;
-}
-#sidebar row:selected .script-cmd {
-    opacity: 0.5;
-}
-.script-name {
-    font-size: 13px;
-    font-weight: 600;
-}
-.script-cmd {
-    font-size: 11px;
-    opacity: 0.5;
-}
-.script-disabled .script-name {
-    opacity: 0.35;
-}
-
-/* -- form panel (right-hand editor) -- */
-#form-title {
-    font-size: 16px;
-    font-weight: 700;
-    padding: 8px 12px 4px;
-}
-
-/* -- home table -- */
-.home-table treeview {
-    font-size: 13px;
-}
-.home-table treeview header button {
-    font-size: 10px;
-    font-weight: 700;
-    letter-spacing: 0.9px;
-    padding: 4px 6px;
-}
-.home-table treeview row {
-    min-height: 0;
-}
-/* Keep the per-row action icons one constant color, like the editor sidebar's
-   icon buttons: hovering (or prelighting) a Home row must not recolor its
-   symbolic icons. The green run icon is a fixed pixbuf, unaffected by this. */
-.home-table treeview.view:hover,
-.home-table treeview.view:selected:hover,
-.home-table treeview.view row:hover {
-    color: @theme_text_color;
-}
-
-/* -- badges (semantic colors kept) -- */
-.badge-pinned {
-    background-color: @theme_selected_bg_color;
-    color: @theme_selected_fg_color;
-    border-radius: 4px;
-    padding: 2px 7px;
-    font-size: 11px;
-    font-weight: 700;
-}
-.badge-disabled {
-    opacity: 0.5;
-    border-radius: 4px;
-    padding: 2px 7px;
-    font-size: 11px;
-    font-weight: 700;
-}
-.badge-error {
-    background-color: #c0392b;
-    color: #ffffff;
-    border-radius: 4px;
-    padding: 2px 7px;
-    font-size: 11px;
-    font-weight: 700;
-}
-.badge-running {
-    background-color: #27ae60;
-    color: #ffffff;
-    border-radius: 4px;
-    padding: 2px 7px;
-    font-size: 11px;
-    font-weight: 700;
-}
-.badge-port {
-    background-color: #2980b9;
-    color: #ffffff;
-    border-radius: 4px;
-    padding: 2px 7px;
-    font-size: 11px;
-    font-weight: 700;
-}
-
-/* -- toolbar + search -- */
-#list-toolbar {
-    padding: 6px 8px;
-}
-#list-toolbar entry {
-    border-radius: 7px;
-    padding: 6px 10px;
-    font-size: 12px;
-}
-
-/* -- form panel -- */
-.form-label {
-    font-size: 10px;
-    font-weight: 700;
-    opacity: 0.6;
-    letter-spacing: 0.9px;
-    margin-bottom: 4px;
-}
-.form-entry {
-    border-radius: 8px;
-    padding: 9px 12px;
-    font-size: 13px;
-}
-.form-hint {
-    font-size: 11px;
-    opacity: 0.45;
-    margin-top: 2px;
-}
-entry.env-ref {
-    opacity: 0.6;
-    font-style: italic;
-}
-entry.env-ref-missing {
-    opacity: 0.7;
-    font-style: italic;
-    color: #d08770;
-}
-.section-header {
-    font-size: 10px;
-    font-weight: 700;
-    color: @theme_selected_bg_color;
-    letter-spacing: 1.1px;
-    padding-bottom: 6px;
-    margin-top: 20px;
-    margin-bottom: 12px;
-}
-
-/* -- buttons -- */
-button:not(.titlebutton) {
-    border-radius: 8px;
-    padding: 8px 16px;
-    font-size: 12px;
-    font-weight: 600;
-}
-headerbar button.titlebutton {
-    background: transparent;
-    border: none;
-    box-shadow: none;
-    padding: 4px;
-    min-width: 24px;
-    min-height: 24px;
-}
-
-/* -- colored button variants (semantic) -- */
-button.btn-primary {
-    background-image: none;
-    background-color: @theme_selected_bg_color;
-    color: @theme_selected_fg_color;
-    border-radius: 8px;
-    border: none;
-}
-button.btn-danger {
-    background-image: none;
-    background-color: #c0392b;
-    color: #ffffff;
-    border-radius: 8px;
-    border: none;
-}
-button.btn-danger:hover {
-    background-image: none;
-    background-color: #d44637;
-}
-button.btn-success {
-    background-image: none;
-    background-color: #27ae60;
-    color: #ffffff;
-    border-radius: 8px;
-    border: none;
-}
-button.btn-success:hover {
-    background-image: none;
-    background-color: #2ecc71;
-}
-button.btn-warning {
-    background-image: none;
-    background-color: #e67e22;
-    color: #ffffff;
-    border-radius: 8px;
-    border: none;
-}
-button.btn-warning:hover {
-    background-image: none;
-    background-color: #f39c12;
-}
-button.btn-secondary {
-    border-radius: 8px;
-}
-button.btn-icon {
-    padding: 2px;
-    min-width: 20px;
-    min-height: 20px;
-    background-image: none;
-    background-color: transparent;
-    border: none;
-    border-radius: 4px;
-    box-shadow: none;
-    opacity: 0.6;
-}
-button.btn-icon:hover {
-    background-image: none;
-    opacity: 1;
-}
-button.btn-icon-run {
-    opacity: 0.6;
-}
-button.btn-icon-run:hover {
-    color: #27ae60;
-    opacity: 1;
-}
-button.btn-icon-run.running {
-    color: #27ae60;
-    opacity: 1;
-}
-/* keep the running play icon green even when its row is selected
-   (otherwise "#sidebar row:selected image" repaints it white) */
-#sidebar row:selected button.btn-icon-run.running,
-#sidebar row:selected button.btn-icon-run.running image {
-    color: #27ae60;
-    opacity: 1;
-}
-
-/* -- dialog -- */
-dialog .dialog-action-area {
-    padding: 8px;
-}
-dialog .dialog-action-area button {
-    margin: 4px;
-    min-width: 80px;
-}
-
-/* -- switches -- */
-switch {
-    border-radius: 12px;
-}
-switch:checked {
-    background-color: @theme_selected_bg_color;
-}
-switch slider {
-    border-radius: 10px;
-}
-
-/* -- empty state -- */
-.empty-state {
-    opacity: 0.45;
-    font-size: 13px;
-}
-
-/* -- scrollbar -- */
-scrollbar slider {
-    border-radius: 4px;
-    min-width: 4px;
-    min-height: 4px;
-}
-
-/* -- notebook tabs -- */
-notebook header tabs tab {
-    padding: 6px 16px;
-    border: none;
-}
-notebook header tabs tab:checked {
-    border-bottom: 2px solid @theme_selected_bg_color;
-}
-
-/* -- log viewer -- */
-.log-view {
-    font-family: 'Ubuntu Mono', 'Fira Code', 'Consolas', monospace;
-    font-size: 12px;
-    padding: 8px;
-}
-
-/* -- group tabs -- */
-#group-tabs {
-    min-height: 32px;
-}
-.group-tab {
-    background-color: transparent;
-    border: none;
-    border-radius: 0;
-    padding: 6px 12px;
-    font-size: 11px;
-    font-weight: 600;
-    border-bottom: 2px solid transparent;
-    min-width: 40px;
-    opacity: 0.6;
-}
-.group-tab:checked {
-    opacity: 1;
-    border-bottom: 2px solid @theme_selected_bg_color;
-    background-color: transparent;
-}
-.group-tab:hover:not(:checked) {
-    opacity: 0.8;
-}
-
-/* -- group checkbox -- */
-checkbutton.group-check {
-    font-size: 12px;
-    padding: 3px 0;
-}
-
-/* -- group card -- */
-.group-card {
-    border-radius: 8px;
-}
-.group-card-selected {
-    background-color: @theme_base_color;
-    color: @theme_text_color;
-    border-left: 3px solid @theme_selected_bg_color;
-}
-.group-card-selected *:not(.badge-error):not(.badge-running):not(.badge-port):not(.badge-pinned) {
-    color: @theme_text_color;
-}
-
-/* -- log search bar -- */
-.log-search-bar {
-    border-radius: 6px;
-    padding: 0;
-    background-color: @theme_bg_color;
-    border: 1px solid @borders;
-}
-.log-search-bar button {
-    border-radius: 0;
-    padding: 6px 8px;
-    min-width: 0;
-    border: none;
-    background-image: none;
-    background-color: @theme_bg_color;
-    box-shadow: none;
-}
-.log-search-entry-wrap {
-    border-radius: 6px 0 0 6px;
-    background-color: @theme_base_color;
-}
-.log-search-entry-wrap entry {
-    border-radius: 6px 0 0 6px;
-    border: none;
-    box-shadow: none;
-    background-color: @theme_base_color;
-    background-image: none;
-}
-.log-search-count {
-    font-size: 11px;
-    opacity: 0.6;
-    padding: 0 6px;
-}
-"""
+_STYLES_FILE = Path(__file__).parent / "styles.css"
 
 
 class ManagerWindow(Gtk.ApplicationWindow):
@@ -554,11 +77,17 @@ class ManagerWindow(Gtk.ApplicationWindow):
         ansi.set_theme(_is_dark_theme())
 
         # runner is GTK-free; install the manager's dialogs for the launch flow.
-        set_prompter(_GtkPrompter())
+        set_prompter(GtkPrompter())
 
         # CSS
         provider = Gtk.CssProvider()
-        provider.load_from_data(CSS.encode("utf-8"))
+        try:
+            provider.load_from_path(str(_STYLES_FILE))
+        except GLib.Error:
+            # Stylesheet missing/unreadable — fall back to no styling rather than
+            # crash. Shouldn't happen in an installed copy (the package dir ships
+            # styles.css), but keeps a raw checkout runnable.
+            pass
         Gtk.StyleContext.add_provider_for_screen(
             Gdk.Screen.get_default(),
             provider,
@@ -1358,49 +887,61 @@ class ManagerWindow(Gtk.ApplicationWindow):
             self._refresh_running_badges()
         return False
 
+    def _stop_scripts_threaded(self, scripts, on_done=None):
+        """Stop scripts off the UI thread so the SIGTERM→SIGKILL grace period
+        (and any port kill) doesn't freeze the window. Badges refresh once done.
+
+        scripts: script dicts to stop (only those currently running are touched).
+        on_done: optional no-arg callback run on the GTK thread afterwards.
+        """
+        running = get_running_ids()
+        targets = [s for s in scripts if s.get("id", "") in running]
+        if not targets:
+            if on_done:
+                GLib.idle_add(on_done)
+            return
+        from .runner import stop_script as _runner_stop, kill_port
+
+        def _work():
+            for s in targets:
+                _runner_stop(s.get("id", ""))
+                port_str = s.get("port", "").strip()
+                if port_str.isdigit():
+                    kill_port(int(port_str))
+            GLib.idle_add(self._refresh_running_badges)
+            GLib.idle_add(self._rebuild_groups_view)
+            if on_done:
+                GLib.idle_add(on_done)
+
+        threading.Thread(target=_work, daemon=True).start()
+
     def _stop_group(self, group):
         cfg = load_config()
         gid = group["id"]
         running = get_running_ids()
-        count = 0
-        for script in cfg.get("scripts", []):
-            sid = script.get("id", "")
-            if gid in script.get("groups", []) and sid in running:
-                stop_script(sid)
-                port_str = script.get("port", "").strip()
-                if port_str and port_str.isdigit():
-                    from .runner import kill_port
-                    kill_port(int(port_str))
-                count += 1
-        self._refresh_running_badges()
-        self._rebuild_groups_view()
-        self._show_toast(f"Stopped {count} script(s) from '{group['name']}'")
+        targets = [s for s in cfg.get("scripts", [])
+                   if gid in s.get("groups", []) and s.get("id", "") in running]
+        self._stop_scripts_threaded(targets)
+        self._show_toast(f"Stopping {len(targets)} script(s) from '{group['name']}'…")
 
     def _restart_group(self, group):
         cfg = load_config()
         gid = group["id"]
         running = get_running_ids()
-        from .runner import run_script
-        scripts_to_restart = []
-        for script in cfg.get("scripts", []):
-            sid = script.get("id", "")
-            if gid in script.get("groups", []) and sid in running:
-                stop_script(sid)
-                port_str = script.get("port", "").strip()
-                if port_str and port_str.isdigit():
-                    from .runner import kill_port
-                    kill_port(int(port_str))
-                scripts_to_restart.append(script)
-        self._refresh_running_badges()
-        self._rebuild_groups_view()
-        def _restart_all():
-            for script in scripts_to_restart:
+        targets = [s for s in cfg.get("scripts", [])
+                   if gid in s.get("groups", []) and s.get("id", "") in running]
+        if not targets:
+            return
+
+        def _relaunch():
+            from .runner import run_script
+            for script in targets:
                 run_script(script)
             GLib.timeout_add(500, lambda: self._refresh_running_badges() and False)
             GLib.timeout_add(600, lambda: self._rebuild_groups_view() or False)
-            return False
-        GLib.timeout_add(600, _restart_all)
-        self._show_toast(f"Restarting {len(scripts_to_restart)} script(s) from '{group['name']}' ↻")
+
+        self._stop_scripts_threaded(targets, on_done=_relaunch)
+        self._show_toast(f"Restarting {len(targets)} script(s) from '{group['name']}' ↻")
 
     def _move_group_up(self, _widget):
         group = self.group_form._group
@@ -1431,46 +972,18 @@ class ManagerWindow(Gtk.ApplicationWindow):
         self._rebuild_groups_view()
 
     def _sort_groups(self, mode):
-        cfg = load_config()
-        groups = cfg.get("groups", [])
-        scripts = cfg.get("scripts", [])
-        running = get_running_ids()
-
-        def _script_count(g):
-            return len([s for s in scripts if g["id"] in s.get("groups", []) and s.get("enabled", True)])
-
-        def _any_running(g):
-            return any(
-                s.get("id", "") in running
-                for s in scripts
-                if g["id"] in s.get("groups", []) and s.get("enabled", True)
+        with config_lock():
+            cfg = load_config()
+            cfg["groups"] = sort_groups(
+                cfg.get("groups", []), mode,
+                scripts=cfg.get("scripts", []),
+                running_ids=get_running_ids(),
             )
-
-        if mode == "name_asc":
-            groups.sort(key=lambda g: g.get("name", "").lower())
-        elif mode == "name_desc":
-            groups.sort(key=lambda g: g.get("name", "").lower(), reverse=True)
-        elif mode == "count_asc":
-            groups.sort(key=_script_count)
-        elif mode == "count_desc":
-            groups.sort(key=_script_count, reverse=True)
-        elif mode == "running_first":
-            groups.sort(key=lambda g: not _any_running(g))
-        elif mode == "stopped_first":
-            groups.sort(key=lambda g: _any_running(g))
-
-        cfg["groups"] = groups
-        save_config(cfg)
+            save_config(cfg)
         self._rebuild_groups_view()
 
     def _stop_single_script(self, script):
-        sid = script.get("id", "")
-        stop_script(sid)
-        port_str = script.get("port", "").strip()
-        if port_str and port_str.isdigit():
-            from .runner import kill_port
-            kill_port(int(port_str))
-        self._refresh_running_badges()
+        self._stop_scripts_threaded([script])
         if self._sidebar_mode == "groups":
             self._rebuild_groups_view()
 
@@ -1777,14 +1290,8 @@ class ManagerWindow(Gtk.ApplicationWindow):
     def _stop_script(self, script: dict):
         if not script:
             return
-        stop_script(script.get("id", ""))
-        # Also kill by port if configured (fallback for stubborn processes)
-        port_str = script.get("port", "").strip()
-        if port_str and port_str.isdigit():
-            from .runner import kill_port
-            kill_port(int(port_str))
-        self._refresh_running_badges()
-        self._show_toast("Script stopped ■")
+        self._stop_scripts_threaded([script])
+        self._show_toast("Stopping script ■")
 
     def _restart_script(self, script: dict):
         if not script:

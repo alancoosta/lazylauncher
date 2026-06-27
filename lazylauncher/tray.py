@@ -15,7 +15,7 @@ from .common import (
     get_running_ids, migrate_state, get_logger, ensure_seed_config,
 )
 from .runner import (
-    run_script, _stop_script, _cleanup_stale_tempfiles, set_prompter,
+    stop_script, _cleanup_stale_tempfiles, set_prompter,
 )
 
 import gi
@@ -32,14 +32,6 @@ gi.require_version("Gtk", "3.0")
 from gi.repository import Gtk
 
 
-try:
-    gi.require_version("AyatanaAppIndicator3", "0.1")
-    from gi.repository import AyatanaAppIndicator3 as AppIndicator3
-except (ValueError, ImportError):
-    gi.require_version("AppIndicator3", "0.1")
-    from gi.repository import AppIndicator3
-
-
 DEFAULT_ICON_PATH = str(Path(__file__).parent / "icons" / "logo.svg")
 
 
@@ -49,40 +41,7 @@ _HICOLOR_ICON = Path.home() / ".local/share/icons/hicolor/scalable/apps/lazylaun
 DEFAULT_ICON  = "lazylauncher" if _HICOLOR_ICON.exists() else DEFAULT_ICON_PATH
 
 
-class _GtkPrompter:
-    """GTK3 implementation of runner's prompter protocol (used by the tray)."""
-
-    def confirm(self, title, message=""):
-        d = Gtk.MessageDialog(
-            flags=Gtk.DialogFlags.MODAL, message_type=Gtk.MessageType.WARNING,
-            buttons=Gtk.ButtonsType.YES_NO, text=title)
-        if message:
-            d.format_secondary_text(message)
-        resp = d.run()
-        d.destroy()
-        return resp == Gtk.ResponseType.YES
-
-    def duplicate_run(self, label, pid, ports):
-        port_info = ""
-        if ports:
-            port_info = "\nListening on port(s): " + ", ".join(str(p) for p in ports)
-        d = Gtk.MessageDialog(
-            flags=Gtk.DialogFlags.MODAL, message_type=Gtk.MessageType.QUESTION,
-            buttons=Gtk.ButtonsType.NONE,
-            text=f"'{label}' is already running.{port_info}")
-        if pid:
-            d.format_secondary_text(f"PID: {pid}")
-        d.add_button("Cancel", Gtk.ResponseType.CANCEL)
-        d.add_button("Run Another", Gtk.ResponseType.YES)
-        kill_btn = d.add_button("Kill & Restart", Gtk.ResponseType.ACCEPT)
-        kill_btn.get_style_context().add_class("destructive-action")
-        resp = d.run()
-        d.destroy()
-        if resp == Gtk.ResponseType.ACCEPT:
-            return "restart"
-        if resp == Gtk.ResponseType.YES:
-            return "another"
-        return "cancel"
+from .ui_shared import GtkPrompter
 
 
 _manager_proc = None
@@ -160,7 +119,7 @@ class LazyLauncherTray:
                 return
             if resp == Gtk.ResponseType.YES:
                 for sid in running:
-                    _stop_script(sid)
+                    stop_script(sid)
         self._shutdown()
 
 
@@ -171,7 +130,7 @@ def main():
     ICON_DIR.mkdir(parents=True, exist_ok=True)
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     _cleanup_stale_tempfiles()
-    set_prompter(_GtkPrompter())   # runner is GTK-free; give it our GTK3 dialogs
+    set_prompter(GtkPrompter())   # runner is GTK-free; give it our GTK3 dialogs
 
     log = get_logger()
     log.info("tray starting")
