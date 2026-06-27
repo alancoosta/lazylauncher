@@ -36,6 +36,17 @@ def test_normalize_preserves_global_marker():
         {"key": "A", "global": True}]
 
 
+def test_normalize_preserves_alias_ref():
+    # An alias names the pool key to reference; the value is dropped.
+    assert common.normalize_env_vars([{"key": "DB_URL", "global": "DATABASE_URL", "value": "ignored"}]) == [
+        {"key": "DB_URL", "global": "DATABASE_URL"}]
+
+
+def test_normalize_non_string_global_falls_back_to_legacy():
+    # A truthy-but-not-string global behaves like the legacy same-key reference.
+    assert common.normalize_env_vars([{"key": "A", "global": 1}]) == [{"key": "A", "global": True}]
+
+
 # -- global_env_map / resolve_env_vars ---------------------------------------
 
 def test_global_env_map_from_cfg():
@@ -58,6 +69,24 @@ def test_resolve_own_value_passthrough_and_mix():
     items = [{"key": "API", "global": True}, {"key": "LOCAL", "value": "1"}]
     assert common.resolve_env_vars(items, {"API": "https://x"}) == [
         {"key": "API", "value": "https://x"}, {"key": "LOCAL", "value": "1"}]
+
+
+def test_resolve_alias_pulls_from_other_key():
+    # An alias local key takes another global's value.
+    items = [{"key": "DB_URL", "global": "DATABASE_URL"}]
+    assert common.resolve_env_vars(items, {"DATABASE_URL": "postgres://x"}) == [
+        {"key": "DB_URL", "value": "postgres://x"}]
+
+
+def test_resolve_alias_orphan_dropped():
+    # An alias whose referenced global is gone is not injected.
+    assert common.resolve_env_vars([{"key": "DB_URL", "global": "MISSING"}], {}) == []
+
+
+def test_resolve_alias_mixed_with_own_value():
+    items = [{"key": "DB_URL", "global": "DATABASE_URL"}, {"key": "PORT", "value": "5432"}]
+    assert common.resolve_env_vars(items, {"DATABASE_URL": "postgres://x"}) == [
+        {"key": "DB_URL", "value": "postgres://x"}, {"key": "PORT", "value": "5432"}]
 
 
 # -- ui_state (last-used tab) -------------------------------------------------

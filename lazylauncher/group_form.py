@@ -2,7 +2,7 @@
 """group_form.py — GroupForm: the per-group editor panel."""
 import gi
 gi.require_version("Gtk", "3.0")
-from gi.repository import Gtk
+from gi.repository import Gtk, Pango
 
 from .common import config_lock, load_config, save_config, get_running_ids
 
@@ -26,6 +26,17 @@ class GroupForm(Gtk.Box):
         self._build()
 
     def _build(self):
+        # ── Title bar: which group is being edited ──
+        self.title_label = Gtk.Label(label="")
+        self.title_label.set_name("form-title")
+        self.title_label.set_halign(Gtk.Align.START)
+        self.title_label.set_xalign(0.0)
+        self.title_label.set_ellipsize(Pango.EllipsizeMode.END)
+        self.title_label.set_max_width_chars(60)
+        title_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+        title_box.pack_start(self.title_label, True, True, 0)
+        self.pack_start(title_box, False, False, 0)
+
         # Notebook with Settings tab
         self.notebook = Gtk.Notebook()
         self.notebook.set_tab_pos(Gtk.PositionType.TOP)
@@ -150,6 +161,7 @@ class GroupForm(Gtk.Box):
 
         # Auto-save
         self.name_entry.connect("changed", lambda _: self._auto_save())
+        self.name_entry.connect("changed", lambda _: self._update_title())
         self.desc_entry.connect("changed", lambda _: self._auto_save())
 
     def load_group(self, group):
@@ -161,10 +173,18 @@ class GroupForm(Gtk.Box):
         self._loading = False
         self._rebuild_script_checkboxes()
         self.update_running_state()
+        self._update_title()
 
     def clear(self):
         self._group = None
         self.set_sensitive(False)
+        self.title_label.set_text("")
+
+    def _update_title(self):
+        name = ""
+        if self._group:
+            name = self.name_entry.get_text().strip() or self._group.get("name", "")
+        self.title_label.set_text(name)
 
     def _rebuild_script_checkboxes(self):
         for child in self._scripts_box.get_children():

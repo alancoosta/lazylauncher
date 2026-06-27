@@ -188,6 +188,13 @@ headerbar .subtitle {
     opacity: 0.35;
 }
 
+/* -- form panel (right-hand editor) -- */
+#form-title {
+    font-size: 16px;
+    font-weight: 700;
+    padding: 8px 12px 4px;
+}
+
 /* -- home table -- */
 .home-table treeview {
     font-size: 13px;
@@ -595,15 +602,8 @@ class ManagerWindow(Gtk.ApplicationWindow):
         self.tab_groups_btn.get_style_context().add_class("group-tab")
         self.tab_groups_btn.connect("toggled", lambda b: self._on_tab_toggled(b, "groups"))
 
-        self.tab_global_btn = Gtk.ToggleButton(label="Global")
-        self.tab_global_btn.set_mode(False)
-        self.tab_global_btn.get_style_context().add_class("group-tab")
-        self.tab_global_btn.set_tooltip_text("Shared env vars reused across scripts")
-        self.tab_global_btn.connect("toggled", lambda b: self._on_tab_toggled(b, "global"))
-
         tab_bar.pack_start(self.tab_all_btn, True, True, 0)
         tab_bar.pack_start(self.tab_groups_btn, True, True, 0)
-        tab_bar.pack_start(self.tab_global_btn, True, True, 0)
         left_box.pack_start(tab_bar, False, False, 0)
 
         # Sidebar stack
@@ -614,8 +614,6 @@ class ManagerWindow(Gtk.ApplicationWindow):
         self.sidebar_stack.add_named(self._build_all_page(), "all")
 
         self.sidebar_stack.add_named(self._build_groups_page(), "groups")
-
-        self.sidebar_stack.add_named(self._build_global_sidebar_page(), "global")
 
         left_box.pack_start(self.sidebar_stack, True, True, 0)
 
@@ -645,15 +643,14 @@ class ManagerWindow(Gtk.ApplicationWindow):
                                 lambda _w, sid: self._home_open_script(sid))
         self.outer_stack.add_named(self.home_view, "home")
         self.outer_stack.add_named(hpaned, "detail")
+        self.outer_stack.add_named(self._build_global_editor(), "envs")
         self.outer_stack.add_named(self.graph_view, "graph")
         self.outer_stack.set_visible_child_name("home")
+        # Capture the saved view *before* wiring _on_view_changed and show_all():
+        # show_all() emits notify::visible-child for the current ("home") page,
+        # which would overwrite the persisted value before we get to read it.
+        self._saved_view = load_ui_state().get("view")
         self.outer_stack.connect("notify::visible-child", self._on_view_changed)
-        # Reopen on the last-used top-level view (Home/Editor/Map). Done after the
-        # signal is wired so _on_view_changed syncs the switch buttons.
-        saved_view = load_ui_state().get("view")
-        if saved_view in ("home", "detail", "graph"):
-            self.outer_stack.set_visible_child_name(saved_view)
-
         ScriptRow._on_run = self._run_script
         ScriptRow._on_stop = self._stop_single_script
         ScriptRow._on_restart = self._restart_script
@@ -668,6 +665,16 @@ class ManagerWindow(Gtk.ApplicationWindow):
                       lambda *_: self._toggle_log_search() or True)
         self.add_accel_group(accel)
         self.show_all()
+
+        # Reopen on the last-used top-level view (Home/Editor/Envs/Map) and Home
+        # sub-tab. Done *after* show_all(): Gtk.Stack silently ignores
+        # set_visible_child_name for children that aren't shown yet, so restoring
+        # before show_all leaves the stack on its first page (an empty Scripts
+        # table under a highlighted Groups tab, etc.).
+        self.home_view.restore_subtab()
+        if self._saved_view in ("home", "detail", "envs", "graph"):
+            self.outer_stack.set_visible_child_name(self._saved_view)
+
         # Select first script if available
         first = self.listbox.get_row_at_index(0)
         if first:
@@ -717,10 +724,13 @@ class ManagerWindow(Gtk.ApplicationWindow):
         self._switching_view = False
         self.view_home_btn = make_tab_button("_Home", "home", self._on_view_toggled, active=True)
         self.view_editor_btn = make_tab_button("_Editor", "detail", self._on_view_toggled)
+        self.view_envs_btn = make_tab_button("En_vs", "envs", self._on_view_toggled)
+        self.view_envs_btn.set_tooltip_text("Shared env vars reused across scripts")
         self.view_map_btn = make_tab_button("_Map", "graph", self._on_view_toggled)
         self.view_map_btn.set_tooltip_text("Show how scripts connect via ports referenced in env vars")
         view_switch.pack_start(self.view_home_btn, False, False, 0)
         view_switch.pack_start(self.view_editor_btn, False, False, 0)
+        view_switch.pack_start(self.view_envs_btn, False, False, 0)
         view_switch.pack_start(self.view_map_btn, False, False, 0)
         hb.set_custom_title(view_switch)
 
@@ -962,33 +972,10 @@ class ManagerWindow(Gtk.ApplicationWindow):
         self.group_form.set_sensitive(False)
         self.right_stack.add_named(self.group_form, "group")
 
-        self.right_stack.add_named(self._build_global_editor(), "global")
-
         return self.right_stack
 
-    def _build_global_sidebar_page(self):
-        """Left page for the Global tab — just a short blurb; editing is on the right."""
-        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
-        page.set_margin_start(16)
-        page.set_margin_end(16)
-        page.set_margin_top(20)
-        title = Gtk.Label(label="GLOBAL ENV")
-        title.set_halign(Gtk.Align.START)
-        title.get_style_context().add_class("section-header")
-        blurb = Gtk.Label(
-            label="Variables defined here can be reused by any script. In a "
-                  "script's Envs tab, type a key listed here to reference it — "
-                  "edit the value once and every script that uses it follows.")
-        blurb.set_halign(Gtk.Align.START)
-        blurb.set_xalign(0)
-        blurb.set_line_wrap(True)
-        blurb.get_style_context().add_class("form-hint")
-        page.pack_start(title, False, False, 0)
-        page.pack_start(blurb, False, False, 0)
-        return page
-
     def _build_global_editor(self):
-        """Right page for the Global tab — the global env key/value table."""
+        """Top-level Envs view — the global env key/value table."""
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         scroll = Gtk.ScrolledWindow()
         scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
@@ -1004,6 +991,17 @@ class ManagerWindow(Gtk.ApplicationWindow):
         header.set_halign(Gtk.Align.START)
         header.get_style_context().add_class("section-header")
         inner.pack_start(header, False, False, 0)
+
+        blurb = Gtk.Label(
+            label="Variables defined here can be reused by any script. In a "
+                  "script's Envs tab, type a key listed here to reference it — "
+                  "edit the value once and every script that uses it follows.")
+        blurb.set_halign(Gtk.Align.START)
+        blurb.set_xalign(0)
+        blurb.set_line_wrap(True)
+        blurb.set_margin_bottom(12)
+        blurb.get_style_context().add_class("form-hint")
+        inner.pack_start(blurb, False, False, 0)
 
         self.global_env_table = EnvVarsTable()
         self.global_env_table.set_hexpand(True)
@@ -1033,14 +1031,14 @@ class ManagerWindow(Gtk.ApplicationWindow):
 
     def _toggle_log_search(self):
         if self.right_stack.get_visible_child_name() == "script":
-            self.form.notebook.set_current_page(1)  # Logs tab
+            self.form.show_logs()
             self.form.log_panel.open_search()
 
     def _refresh_logs_tab(self) -> bool:
         # Check if error/running states changed — only then rebuild sidebar
         new_errors = get_error_states()
         new_running = get_running_ids()
-        if self.form.notebook.get_current_page() == 1:
+        if self.form.logs_tab_active():
             self.form.log_panel.reload_log()
         else:
             self.form.log_panel.mark_pending()
@@ -1117,13 +1115,9 @@ class ManagerWindow(Gtk.ApplicationWindow):
         self._sidebar_mode = tab
         self.tab_all_btn.set_active(tab == "all")
         self.tab_groups_btn.set_active(tab == "groups")
-        self.tab_global_btn.set_active(tab == "global")
         self._switching_tab = False
         self.sidebar_stack.set_visible_child_name(tab)
-        if tab == "global":
-            self.global_env_table.set_env_vars(load_config().get("global_env"))
-            self.right_stack.set_visible_child_name("global")
-        elif tab == "groups":
+        if tab == "groups":
             self._rebuild_groups_view()
             if self._selected_group_id:
                 cfg = load_config()
@@ -1311,7 +1305,7 @@ class ManagerWindow(Gtk.ApplicationWindow):
     def _open_script_settings(self, script):
         """Navigate to a script's Settings tab from group view."""
         self.form.load_script(script)
-        self.form.notebook.set_current_page(0)
+        self.form.show_settings()
         self.right_stack.set_visible_child_name("script")
 
     def _open_terminal(self, script):
@@ -1324,13 +1318,13 @@ class ManagerWindow(Gtk.ApplicationWindow):
     def _open_script_logs(self, script):
         """Navigate to a script's Logs tab from group view."""
         self.form.load_script(script)
-        self.form.notebook.set_current_page(1)
+        self.form.show_logs()
         self.right_stack.set_visible_child_name("script")
 
     def _open_script_envs(self, script):
         """Navigate to a script's Envs tab."""
         self.form.load_script(script)
-        self.form.notebook.set_current_page(2)
+        self.form.show_envs()
         self.right_stack.set_visible_child_name("script")
 
     def _run_group(self, group):
@@ -1503,9 +1497,9 @@ class ManagerWindow(Gtk.ApplicationWindow):
             save_config(cfg)
         return updated
 
-    def _home_open_script(self, script_id, page=0):
-        """Open a script in the editor at the given notebook page (0=Settings,
-        1=Logs, 2=Envs) and switch to the detail view."""
+    def _home_open_script(self, script_id, tab="settings"):
+        """Open a script in the editor on the given tab
+        ('settings'/'envs'/'logs') and switch to the detail view."""
         script = self._find_script(script_id)
         if not script:
             return
@@ -1516,7 +1510,12 @@ class ManagerWindow(Gtk.ApplicationWindow):
                 self.listbox.select_row(row)
                 break
         self.form.load_script(script)
-        self.form.notebook.set_current_page(page)
+        if tab == "logs":
+            self.form.show_logs()
+        elif tab == "envs":
+            self.form.show_envs()
+        else:
+            self.form.show_settings()
         self.right_stack.set_visible_child_name("script")
         self.outer_stack.set_visible_child_name("detail")
 
@@ -1613,11 +1612,14 @@ class ManagerWindow(Gtk.ApplicationWindow):
         self._switching_view = True
         self.view_home_btn.set_active(name == "home")
         self.view_editor_btn.set_active(name == "detail")
+        self.view_envs_btn.set_active(name == "envs")
         self.view_map_btn.set_active(name == "graph")
         self._switching_view = False
         save_ui_state(view=name)
         if name == "home":
             self.home_view.reload_active()
+        elif name == "envs":
+            self.global_env_table.set_env_vars(load_config().get("global_env"))
         elif name == "graph":
             self.graph_view.reload(load_config(), get_running_ids())
             self.graph_view.grab_canvas_focus()
@@ -1717,7 +1719,7 @@ class ManagerWindow(Gtk.ApplicationWindow):
         if last:
             self.listbox.select_row(last)
             self.form.load_script(script)
-            self.form.notebook.set_current_page(0)
+            self.form.show_settings()
             self.right_stack.set_visible_child_name("script")
             self.form.name_entry.grab_focus()
 

@@ -176,9 +176,14 @@ def normalize_env_vars(raw) -> list:
     empty key are skipped. Keys are stripped; values are preserved as-is so
     they may contain spaces.
 
-    A dict item with a truthy ``global`` flag is a *live reference* to the
-    global pool and is preserved as ``{"key": K, "global": True}`` (no value);
-    its value is resolved at launch time by :func:`resolve_env_vars`.
+    A dict item with a truthy ``global`` field is a *live reference* to the
+    global pool and carries no value of its own; its value is resolved at launch
+    time by :func:`resolve_env_vars`. Two shapes are supported:
+
+    - ``{"key": K, "global": True}`` — references the pool entry under the *same*
+      key ``K`` (the original form).
+    - ``{"key": K, "global": "X"}`` — an *alias*: the local key ``K`` takes the
+      value of the pool entry ``X`` (``X`` may differ from ``K``).
     """
     result = []
     if isinstance(raw, list):
@@ -188,8 +193,12 @@ def normalize_env_vars(raw) -> list:
             key = str(item.get("key", "")).strip()
             if not key:
                 continue
-            if item.get("global"):
-                result.append({"key": key, "global": True})
+            g = item.get("global")
+            if g:
+                if isinstance(g, str) and g.strip():
+                    result.append({"key": key, "global": g.strip()})
+                else:
+                    result.append({"key": key, "global": True})
             else:
                 result.append({"key": key, "value": str(item.get("value", ""))})
     elif isinstance(raw, str):
@@ -217,15 +226,19 @@ def resolve_env_vars(items, global_map) -> list:
     """Resolve a script's ``env_vars`` against the global pool.
 
     ``items`` may contain own values (``{"key","value"}``) and live references
-    to the pool (``{"key","global":True}``). Returns a fully-resolved list of
-    ``{"key","value"}`` dicts. A reference whose key is no longer in the pool is
-    dropped (the variable is simply not injected).
+    to the pool (``{"key","global":...}``). A ``global`` of ``True`` references
+    the pool entry under the same key; a string references that pool key (an
+    *alias* — local key takes another global's value). Returns a fully-resolved
+    list of ``{"key","value"}`` dicts. A reference whose pool key is no longer in
+    the pool is dropped (the variable is simply not injected).
     """
     result = []
     for item in normalize_env_vars(items):
-        if item.get("global"):
-            if item["key"] in global_map:
-                result.append({"key": item["key"], "value": global_map[item["key"]]})
+        g = item.get("global")
+        if g:
+            ref = g if isinstance(g, str) else item["key"]
+            if ref in global_map:
+                result.append({"key": item["key"], "value": global_map[ref]})
         else:
             result.append({"key": item["key"], "value": item.get("value", "")})
     return result
@@ -297,7 +310,7 @@ def ensure_seed_config():
             {
                 "id": "example-files", "name": "Example: List Files",
                 "command": "ls -lah", "working_dir": str(Path.home()),
-                "pinned_icon": False, "enabled": True,
+                "enabled": True,
                 "description": "Lists your home directory. Replace with your own!",
                 "env_vars": [], "port": "", "confirm": False,
                 "silent": False, "login_shell": True, "groups": ["example-dev"],
@@ -305,7 +318,7 @@ def ensure_seed_config():
             {
                 "id": "example-clock", "name": "Example: Clock (silent)",
                 "command": "date && sleep 2", "working_dir": str(Path.home()),
-                "pinned_icon": False, "enabled": True,
+                "enabled": True,
                 "description": "Runs in the background and notifies when done.",
                 "env_vars": [], "port": "", "confirm": False,
                 "silent": True, "login_shell": True, "groups": ["example-dev"],

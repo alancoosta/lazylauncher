@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""script_form.py — ScriptForm: the per-script editor panel (Settings/Logs/Envs tabs)."""
+"""script_form.py — ScriptForm: the per-script editor panel (Settings/Envs/Logs tabs)."""
 from pathlib import Path
 
 import gi
 gi.require_version("Gtk", "3.0")
-from gi.repository import Gtk
+from gi.repository import Gtk, Pango
 
 from .common import (
     load_config, save_config, config_lock, global_env_map, CONFIG_FILE,
@@ -33,6 +33,17 @@ class ScriptForm(Gtk.Box):
         self._build()
 
     def _build(self):
+        # ── Title bar: which script is being edited ──
+        self.title_label = Gtk.Label(label="")
+        self.title_label.set_name("form-title")
+        self.title_label.set_halign(Gtk.Align.START)
+        self.title_label.set_xalign(0.0)
+        self.title_label.set_ellipsize(Pango.EllipsizeMode.END)
+        self.title_label.set_max_width_chars(60)
+        title_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+        title_box.pack_start(self.title_label, True, True, 0)
+        self.pack_start(title_box, False, False, 0)
+
         # Notebook with Settings and Logs tabs
         self.notebook = Gtk.Notebook()
         self.notebook.set_tab_pos(Gtk.PositionType.TOP)
@@ -210,27 +221,23 @@ class ScriptForm(Gtk.Box):
             box.pack_end(switch, False, False, 0)
             return box
 
-        self.pin_switch = Gtk.Switch()
         self.enabled_switch = Gtk.Switch()
         self.confirm_switch = Gtk.Switch()
         self.silent_switch = Gtk.Switch()
         self.login_shell_switch = Gtk.Switch()
 
         options_grid.attach(
-            _option_cell("Pin as tray icon", "Dedicated icon in the panel", self.pin_switch),
+            _option_cell("Enabled", "Include in group runs", self.enabled_switch),
             0, 0, 1, 1)
         options_grid.attach(
-            _option_cell("Enabled", "Show in the tray menu", self.enabled_switch),
+            _option_cell("Confirm before running", "Dialog before execution", self.confirm_switch),
             1, 0, 1, 1)
         options_grid.attach(
-            _option_cell("Confirm before running", "Dialog before execution", self.confirm_switch),
+            _option_cell("Silent mode", "Background, notify when done", self.silent_switch),
             0, 1, 1, 1)
         options_grid.attach(
-            _option_cell("Silent mode", "Background, notify when done", self.silent_switch),
-            1, 1, 1, 1)
-        options_grid.attach(
             _option_cell("Login shell", "Source ~/.profile & ~/.bashrc (PATH, nvm…)", self.login_shell_switch),
-            0, 2, 1, 1)
+            1, 1, 1, 1)
 
         inner.pack_start(options_grid, False, False, 0)
 
@@ -306,10 +313,6 @@ class ScriptForm(Gtk.Box):
         settings_box.pack_start(action_bar, False, False, 0)
         self.notebook.append_page(settings_box, Gtk.Label(label="Settings"))
 
-        # ── Logs tab ──
-        self.log_panel = LogPanel()
-        self.notebook.append_page(self.log_panel, Gtk.Label(label="Logs"))
-
         # ── Envs tab ──
         envs_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
 
@@ -349,18 +352,43 @@ class ScriptForm(Gtk.Box):
         envs_box.pack_start(env_scroll, True, True, 0)
         self.notebook.append_page(envs_box, Gtk.Label(label="Envs"))
 
+        # ── Logs tab ──
+        self.log_panel = LogPanel()
+        self.notebook.append_page(self.log_panel, Gtk.Label(label="Logs"))
+
+        # Tab order is Settings → Envs → Logs; capture the page indices once so
+        # the navigation helpers below stay correct if the order ever changes.
+        self._page_settings = self.notebook.page_num(settings_box)
+        self._page_envs = self.notebook.page_num(envs_box)
+        self._page_logs = self.notebook.page_num(self.log_panel)
+
         self.notebook.connect("switch-page", self._on_tab_switched)
 
         # Auto-save on any field change
         self.name_entry.connect("changed", lambda _: self._auto_save())
+        self.name_entry.connect("changed", lambda _: self._update_title())
         self.desc_entry.connect("changed", lambda _: self._auto_save())
         self.cmd_entry.connect("changed", lambda _: self._auto_save())
         self.wd_entry.connect("changed", lambda _: self._auto_save())
         self.env_entry.connect("changed", lambda _: self._auto_save())
         self.port_entry.connect("changed", lambda _: self._auto_save())
-        for sw in (self.pin_switch, self.enabled_switch,
+        for sw in (self.enabled_switch,
                    self.confirm_switch, self.silent_switch):
             sw.connect("notify::active", lambda *_: self._auto_save())
+
+    # -- tab navigation (order set at build time; indices never hardcoded) ----
+
+    def show_settings(self):
+        self.notebook.set_current_page(self._page_settings)
+
+    def show_envs(self):
+        self.notebook.set_current_page(self._page_envs)
+
+    def show_logs(self):
+        self.notebook.set_current_page(self._page_logs)
+
+    def logs_tab_active(self) -> bool:
+        return self.notebook.get_current_page() == self._page_logs
 
     def load_script(self, script: dict):
         self._loading = True
@@ -369,7 +397,6 @@ class ScriptForm(Gtk.Box):
         self.desc_entry.set_text(script.get("description", ""))
         self.cmd_entry.set_text(script.get("command", ""))
         self.wd_entry.set_text(script.get("working_dir", str(Path.home())))
-        self.pin_switch.set_active(script.get("pinned_icon", False))
         self.enabled_switch.set_active(script.get("enabled", True))
         self.env_entry.set_global_pool(global_env_map())
         self.env_entry.set_env_vars(script.get("env_vars", ""))
@@ -381,15 +408,23 @@ class ScriptForm(Gtk.Box):
         self.set_sensitive(True)
         self._loading = False
         self.log_panel.set_script(script)
-        if self.notebook.get_current_page() == 1:
+        if self.logs_tab_active():
             self.log_panel.reload_if_pending()
         self.log_panel.update_error_banner()
         self._rebuild_group_checkboxes()
         self._rebuild_dep_checkboxes()
+        self._update_title()
 
     def clear(self):
         self._script = None
         self.set_sensitive(False)
+        self.title_label.set_text("")
+
+    def _update_title(self):
+        name = ""
+        if self._script:
+            name = self.name_entry.get_text().strip() or self._script.get("name", "")
+        self.title_label.set_text(name)
 
     def refresh_global_pool(self):
         """Re-inject the global pool so references / autocomplete stay current.
@@ -463,7 +498,7 @@ class ScriptForm(Gtk.Box):
         self._save()
 
     def _on_tab_switched(self, notebook, page, page_num):
-        if page_num == 1:
+        if page is self.log_panel:
             self.log_panel.reload_if_pending()
 
     def _save(self, _widget=None):
@@ -473,7 +508,6 @@ class ScriptForm(Gtk.Box):
         self._script["description"] = self.desc_entry.get_text().strip()
         self._script["command"]     = self.cmd_entry.get_text().strip()
         self._script["working_dir"] = self.wd_entry.get_text().strip() or str(Path.home())
-        self._script["pinned_icon"] = self.pin_switch.get_active()
         self._script["enabled"]     = self.enabled_switch.get_active()
         self._script["env_vars"]    = self.env_entry.get_env_vars()
         self._script["port"]        = self.port_entry.get_text().strip()
@@ -483,6 +517,7 @@ class ScriptForm(Gtk.Box):
         self._script["depends_on"]  = [sid for sid, cb in self._dep_checkboxes.items() if cb.get_active()]
         self._script["groups"]      = [gid for gid, cb in self._group_checkboxes.items() if cb.get_active()]
         self._script.pop("icon", None)  # custom-icon feature removed; drop stale data
+        self._script.pop("pinned_icon", None)  # pinned-tray-icon feature removed; drop stale data
         self._on_save(self._script)
 
     def _run_current(self, _widget=None):
