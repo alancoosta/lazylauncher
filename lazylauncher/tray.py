@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 """
 LazyLauncher - Tray daemon
-Reads config from ~/.config/lazylauncher/.lazylauncher-config.json and builds
-an AppIndicator menu with all registered scripts.
-Also spawns one extra indicator per script that has pinned_icon=true.
+Shows an AppIndicator with a static menu: "Manage Scripts…" (opens the manager)
+and "Quit". Script launching lives in the manager window.
 """
-import json
 import os
 import subprocess
 import sys
@@ -13,13 +11,11 @@ import signal
 from pathlib import Path
 
 from .common import (
-    CONFIG_DIR, CONFIG_FILE, ICON_DIR, LOG_DIR,
-    get_running_ids, find_script_pid, load_config, log_path,
-    migrate_state, get_logger, ensure_seed_config,
+    CONFIG_DIR, ICON_DIR, LOG_DIR,
+    get_running_ids, migrate_state, get_logger, ensure_seed_config,
 )
 from .runner import (
-    run_script, _stop_script, _cleanup_stale_tempfiles, find_ports_for_pid,
-    set_prompter,
+    run_script, _stop_script, _cleanup_stale_tempfiles, set_prompter,
 )
 
 import gi
@@ -33,7 +29,7 @@ except (ValueError, ImportError):
     from gi.repository import AppIndicator3
 
 gi.require_version("Gtk", "3.0")
-from gi.repository import Gtk, Gdk, GLib, GdkPixbuf
+from gi.repository import Gtk
 
 
 try:
@@ -112,25 +108,6 @@ def open_manager():
         env=env, start_new_session=True)
 
 
-def _open_log_file(path: str):
-    """Open a log file in the default text editor or terminal pager."""
-    try:
-        subprocess.Popen(["xdg-open", path], start_new_session=True)
-    except FileNotFoundError:
-        for term in ["gnome-terminal", "xfce4-terminal", "xterm"]:
-            try:
-                subprocess.Popen([term, "--", "less", "+G", path], start_new_session=True)
-                return
-            except FileNotFoundError:
-                continue
-
-
-def resolve_icon(script: dict) -> str:
-    """Return the icon to use for a script. Per-script custom icons were
-    removed, so this is always the default app icon."""
-    return DEFAULT_ICON
-
-
 class LazyLauncherTray:
     def __init__(self):
         self.indicator = AppIndicator3.Indicator.new(
@@ -141,60 +118,10 @@ class LazyLauncherTray:
         self.indicator.set_status(AppIndicator3.IndicatorStatus.ACTIVE)
         self.indicator.set_title("LazyLauncher")
 
-        self.pinned_indicators: list = []
-        self._last_running: set = set()
         self._build_menu()
 
-        self._config_mtime: float = CONFIG_FILE.stat().st_mtime if CONFIG_FILE.exists() else 0
-        GLib.timeout_add_seconds(3, self._poll)
-
-    def _make_running_item(self, script, sid):
-        """Build a menu item for a running script with port info."""
-        item = Gtk.MenuItem()
-        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        try:
-            # Render at the widget's scale factor so the icon stays crisp on HiDPI.
-            sf = max(1, box.get_scale_factor())
-            pixbuf = GdkPixbuf.Pixbuf.new_from_file_at_size(
-                str(Path(__file__).parent / "icons" / "run-green.png"), 16 * sf, 16 * sf
-            )
-            surface = Gdk.cairo_surface_create_from_pixbuf(pixbuf, sf, None)
-            box.pack_start(Gtk.Image.new_from_surface(surface), False, False, 0)
-        except Exception:
-            box.pack_start(Gtk.Image.new_from_icon_name("media-playback-start", Gtk.IconSize.MENU), False, False, 0)
-        pid = find_script_pid(sid)
-        ports = find_ports_for_pid(pid) if pid else []
-        port_suffix = f"  :{', :'.join(str(p) for p in ports)}" if ports else ""
-        lbl = Gtk.Label(label=f"{script.get('name', 'Unnamed')}{port_suffix}", xalign=0)
-        box.pack_start(lbl, True, True, 0)
-        item.add(box)
-        return item
-
     def _build_menu(self):
-        config  = load_config()
-        scripts = config.get("scripts", [])
-        running = get_running_ids()
-
         menu = Gtk.Menu()
-
-        if scripts:
-            for script in scripts:
-                if not script.get("enabled", True):
-                    continue
-                sid = script.get("id", "")
-                if sid in running:
-                    item = self._make_running_item(script, sid)
-                else:
-                    item = Gtk.MenuItem(label=script.get("name", "Unnamed"))
-                item.set_tooltip_text(script.get("command", ""))
-                item.connect("activate", lambda _w, s=script: run_script(s))
-                menu.append(item)
-            menu.append(Gtk.SeparatorMenuItem())
-        else:
-            placeholder = Gtk.MenuItem(label="(no scripts — add some)")
-            placeholder.set_sensitive(False)
-            menu.append(placeholder)
-            menu.append(Gtk.SeparatorMenuItem())
 
         manage_item = Gtk.MenuItem(label="⚙  Manage Scripts…")
         manage_item.connect("activate", lambda _: open_manager())
@@ -208,69 +135,9 @@ class LazyLauncherTray:
 
         menu.show_all()
         self.indicator.set_menu(menu)
-        self._rebuild_pinned(scripts)
-
-    def _rebuild_pinned(self, scripts: list):
-        for old in self.pinned_indicators:
-            old.set_status(AppIndicator3.IndicatorStatus.PASSIVE)
-        self.pinned_indicators.clear()
-        for script in scripts:
-            if script.get("pinned_icon", False) and script.get("enabled", True):
-                self._create_pinned(script)
-
-    def _create_pinned(self, script: dict):
-        ind_id = f"lazylauncher-pinned-{script.get('id', script['name'])}"
-        icon = resolve_icon(script)
-        ind = AppIndicator3.Indicator.new(
-            ind_id, icon,
-            AppIndicator3.IndicatorCategory.APPLICATION_STATUS,
-        )
-        ind.set_status(AppIndicator3.IndicatorStatus.ACTIVE)
-        ind.set_title(script.get("name", ""))
-
-        menu = Gtk.Menu()
-        run_item = Gtk.MenuItem(label=f"▶  Run: {script.get('name', '')}")
-        run_item.set_tooltip_text(script.get("command", ""))
-        run_item.connect("activate", lambda _w, s=script: run_script(s))
-        menu.append(run_item)
-
-        sid = script.get("id", "")
-        if sid:
-            running = get_running_ids()
-            status = " (running)" if sid in running else ""
-            log_item = Gtk.MenuItem(label=f"📋  View Logs{status}")
-            lp = log_path(sid)
-            if lp.exists() and lp.stat().st_size > 0:
-                log_item.connect("activate", lambda _w, p=str(lp): _open_log_file(p))
-            else:
-                log_item.set_sensitive(False)
-            menu.append(log_item)
-
-        menu.append(Gtk.SeparatorMenuItem())
-        manage_item = Gtk.MenuItem(label="⚙  Manage Scripts…")
-        manage_item.connect("activate", lambda _: open_manager())
-        menu.append(manage_item)
-
-        menu.show_all()
-        ind.set_menu(menu)
-        self.pinned_indicators.append(ind)
-
-    def _poll(self) -> bool:
-        if CONFIG_FILE.exists():
-            mtime = CONFIG_FILE.stat().st_mtime
-            if mtime != self._config_mtime:
-                self._config_mtime = mtime
-                self._build_menu()   # surgical rebuild; no process restart, no self-restart loop
-        running = get_running_ids()
-        if running != self._last_running:
-            self._last_running = running
-            self._build_menu()
-        return True
 
     def _shutdown(self):
         """Quit cleanly without prompting (used by signals/logout)."""
-        for ind in self.pinned_indicators:
-            ind.set_status(AppIndicator3.IndicatorStatus.PASSIVE)
         Gtk.main_quit()
 
     def _quit(self, _widget=None):

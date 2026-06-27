@@ -164,11 +164,6 @@ class ScriptRow(Gtk.ListBoxRow):
             badge.set_tooltip_text(f"Depends on {len(deps)} script(s)")
             self._badge_box.pack_start(badge, False, False, 0)
 
-        if self.script.get("pinned_icon"):
-            badge = Gtk.Label(label="PIN")
-            badge.get_style_context().add_class("badge-pinned")
-            self._badge_box.pack_start(badge, False, False, 0)
-
         if not self.script.get("enabled", True):
             badge = Gtk.Label(label="OFF")
             badge.get_style_context().add_class("badge-disabled")

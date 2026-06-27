@@ -45,7 +45,6 @@ def new_script() -> dict:
         "name":        "New Script",
         "command":     "",
         "working_dir": str(Path.home()),
-        "pinned_icon": False,
         "enabled":     True,
         "description": "",
         "env_vars":    [],

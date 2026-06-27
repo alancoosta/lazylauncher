@@ -105,7 +105,9 @@ class HomeView(Gtk.Box):
         self.pack_start(self.home_inner_stack, True, True, 0)
 
         # Restore the last-used Home sub-tab (Scripts/Groups); toggling the
-        # button drives _on_home_tab_toggled which switches the stack.
+        # button drives _on_home_tab_toggled which switches the stack. The stack
+        # switch only sticks once the widget is shown, so the manager also calls
+        # restore_subtab() after its show_all() (see that method).
         if load_ui_state().get("home_tab") == "groups":
             self.home_groups_tab.set_active(True)
 
@@ -402,6 +404,17 @@ class HomeView(Gtk.Box):
         return query in hay or any(self._query_matches_script(query, s) for s in members)
 
     # -- reload (public: called by the manager after CRUD elsewhere) -------------
+
+    def restore_subtab(self):
+        """Re-assert the saved sub-tab after the window's show_all().
+
+        Gtk.Stack ignores set_visible_child_name for children that aren't shown
+        yet, so the switch attempted in __init__ is a no-op while the window is
+        still being built. Re-apply it here once everything is mapped, then load
+        the now-visible table.
+        """
+        self.home_inner_stack.set_visible_child_name(self._home_mode)
+        self.reload_active()
 
     def reload_active(self, *_):
         """Reload only the currently visible home sub-table."""
