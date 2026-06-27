@@ -47,6 +47,29 @@ def test_merge_skips_entries_without_id():
     assert [g["id"] for g in out["groups"]] == ["g1", "g2"]
 
 
+def test_merge_reassociates_existing_scripts_to_imported_group():
+    # A script that already lives here (same id) is skipped on import, but the
+    # imported group should still claim it — otherwise the imported group looks
+    # empty even though the export said the script belongs to it.
+    cfg = {"scripts": [{"id": "s1", "name": "local", "groups": []}], "groups": []}
+    imported = {"scripts": [{"id": "s1", "name": "remote", "groups": ["g1"]}],
+                "groups": [{"id": "g1", "name": "G1"}]}
+    out, added = config_io.merge_imported(cfg, imported)
+    assert added == 0
+    assert [g["id"] for g in out["groups"]] == ["g1"]
+    s1 = next(s for s in out["scripts"] if s["id"] == "s1")
+    assert "g1" in s1["groups"]            # re-associated to the imported group
+    assert s1["name"] == "local"           # existing script not overwritten
+
+
+def test_merge_does_not_duplicate_group_membership():
+    cfg = {"scripts": [{"id": "s1", "groups": ["g1"]}], "groups": [{"id": "g1"}]}
+    imported = {"scripts": [{"id": "s1", "groups": ["g1"]}], "groups": [{"id": "g1"}]}
+    out, _ = config_io.merge_imported(cfg, imported)
+    s1 = next(s for s in out["scripts"] if s["id"] == "s1")
+    assert s1["groups"] == ["g1"]          # not ["g1", "g1"]
+
+
 def test_read_config_file(tmp_path):
     p = tmp_path / "c.json"
     p.write_text(json.dumps({"scripts": [{"id": "z"}], "groups": []}))

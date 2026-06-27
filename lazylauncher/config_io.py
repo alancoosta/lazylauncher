@@ -22,6 +22,11 @@ def merge_imported(cfg: dict, imported: dict):
 
     Entries whose id already exists in ``cfg`` are skipped. ``cfg`` is mutated in
     place and also returned, alongside the number of scripts actually added.
+
+    A script that already lived here (same id) is not overwritten, but it IS
+    re-associated with any imported group the export said it belongs to —
+    otherwise an imported group would look empty when its scripts already
+    existed locally.
     """
     existing_ids = {s.get("id") for s in cfg.get("scripts", [])}
     added = 0
@@ -35,6 +40,19 @@ def merge_imported(cfg: dict, imported: dict):
         gid = g.get("id")
         if gid is not None and gid not in existing_gids:
             cfg.setdefault("groups", []).append(g)
+
+    # Re-associate: copy imported-group memberships onto scripts that already
+    # existed here (they were skipped above) so the imported group isn't empty.
+    imported_gids = {g.get("id") for g in imported.get("groups", [])
+                     if g.get("id") is not None}
+    if imported_gids:
+        src_groups = {s.get("id"): s.get("groups", []) for s in imported.get("scripts", [])}
+        for s in cfg.get("scripts", []):
+            for gid in src_groups.get(s.get("id"), []):
+                if gid in imported_gids:
+                    groups = s.setdefault("groups", [])
+                    if gid not in groups:
+                        groups.append(gid)
     return cfg, added
 
 
