@@ -342,3 +342,38 @@ def test_stop_script_kills_tracked_and_marks_stopped(monkeypatch, tmp_path):
     assert "s1" in json.loads(rs.read_text())
     runner.stop_script("s1")
     assert "s1" not in json.loads(rs.read_text())   # marked stopped
+
+
+# -- _process_on_port / find_ports_for_pid (ss integration) --------------------
+
+SS_LINE = 'LISTEN 0 511 *:3000 *:* users:(("node",pid=1234,fd=5))'
+
+
+def _ss_run(stdout=""):
+    return lambda *a, **k: types.SimpleNamespace(stdout=stdout, stderr="", returncode=0)
+
+
+def test_process_on_port_finds_listener(monkeypatch):
+    monkeypatch.setattr(runner.subprocess, "run", _ss_run(SS_LINE))
+    assert runner._process_on_port(3000) == ("node", 1234)
+
+
+def test_process_on_port_returns_none_when_no_match(monkeypatch):
+    monkeypatch.setattr(runner.subprocess, "run", _ss_run("nothing here"))
+    assert runner._process_on_port(3000) == (None, None)
+
+
+def test_process_on_port_swallows_ss_failure(monkeypatch):
+    monkeypatch.setattr(runner.subprocess, "run",
+                        lambda *a, **k: (_ for _ in ()).throw(FileNotFoundError("no ss")))
+    assert runner._process_on_port(3000) == (None, None)
+
+
+def test_find_ports_for_pid_collects_listening_ports(monkeypatch):
+    ss_out = (
+        'LISTEN 0 511 *:3000 *:* users:(("node",pid=1234,fd=5))\n'
+        'LISTEN 0 511 127.0.0.1:5432 *:* users:(("postgres",pid=1234,fd=3))'
+    )
+    monkeypatch.setattr(runner.subprocess, "run", _ss_run(ss_out))
+    monkeypatch.setattr(runner, "_descendant_pids", lambda pid: [1234])
+    assert sorted(runner.find_ports_for_pid(1234)) == [3000, 5432]
