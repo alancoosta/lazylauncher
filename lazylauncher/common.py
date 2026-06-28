@@ -63,20 +63,30 @@ _logger = None
 
 
 def get_logger() -> logging.Logger:
-    """Return the app logger, writing to STATE_DIR/lazylauncher.log (rotating)."""
+    """Return the app logger, writing to STATE_DIR/lazylauncher.log (rotating).
+
+    Never raises: if the log file can't be created (read-only home, full disk),
+    it falls back to a NullHandler so callers — often inside their own
+    ``except`` blocks — can't crash the app just by trying to log.
+    """
     global _logger
     if _logger is None:
-        STATE_DIR.mkdir(parents=True, exist_ok=True)
         log = logging.getLogger("lazylauncher")
         log.setLevel(logging.INFO)
         if not log.handlers:
-            handler = RotatingFileHandler(
-                str(APP_LOG_FILE), maxBytes=MAX_LOG_SIZE, backupCount=1
-            )
-            handler.setFormatter(
-                logging.Formatter("%(asctime)s %(levelname)s %(message)s")
-            )
-            log.addHandler(handler)
+            try:
+                STATE_DIR.mkdir(parents=True, exist_ok=True)
+                handler = RotatingFileHandler(
+                    str(APP_LOG_FILE), maxBytes=MAX_LOG_SIZE, backupCount=1
+                )
+                handler.setFormatter(
+                    logging.Formatter("%(asctime)s %(levelname)s %(message)s")
+                )
+                log.addHandler(handler)
+            except OSError:
+                # Last resort: silently drop records. Logging must never be the
+                # thing that crashes an app already handling another error.
+                log.addHandler(logging.NullHandler())
         _logger = log
     return _logger
 

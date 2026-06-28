@@ -290,3 +290,28 @@ def test_normalize_script_drops_legacy_keys():
     out = common.normalize_script(s)
     assert "icon" not in out and "pinned_icon" not in out
     assert out["name"] == "X"
+
+
+# -- get_logger (must never raise, even when STATE_DIR is unwritable) -----------
+
+def test_get_logger_tolerates_unwritable_state_dir(monkeypatch, tmp_path):
+    import logging
+    log = logging.getLogger("lazylauncher")
+    saved_handlers = list(log.handlers)
+    saved_logger = common._logger
+    log.handlers.clear()
+    monkeypatch.setattr(common, "_logger", None)
+    monkeypatch.setattr(common, "STATE_DIR", tmp_path)
+
+    def boom_handler(*a, **k):
+        raise OSError("cannot open log file")
+
+    monkeypatch.setattr(common, "RotatingFileHandler", boom_handler)
+    try:
+        out = common.get_logger()                       # must not raise
+        assert isinstance(out, logging.Logger)
+        assert any(isinstance(h, logging.NullHandler) for h in out.handlers)
+    finally:
+        log.handlers.clear()
+        log.handlers.extend(saved_handlers)
+        common._logger = saved_logger
