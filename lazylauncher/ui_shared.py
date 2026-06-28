@@ -39,6 +39,24 @@ def make_tab_button(label, mode, on_toggled, active=False):
     return btn
 
 
+def make_icon_button(label, tooltip="", on_click=None, css_class="btn-icon"):
+    """Build a small icon/text button (the sort/move/run toolbar buttons share
+    this look): ``btn-icon`` style, optional tooltip, optional ``clicked`` hook.
+
+    ``on_click`` is connected straight to ``clicked`` (so it receives the button,
+    like any ``clicked`` handler); ignore it or capture data in a default arg,
+    e.g. ``make_icon_button("A→Z", tip, lambda _, m=mode: sort(m))`` or pass a
+    bound ``self._move_up`` directly.
+    """
+    btn = Gtk.Button(label=label)
+    btn.get_style_context().add_class(css_class)
+    if tooltip:
+        btn.set_tooltip_text(tooltip)
+    if on_click is not None:
+        btn.connect("clicked", on_click)
+    return btn
+
+
 def new_script() -> dict:
     return {
         "id":          str(uuid.uuid4())[:8],

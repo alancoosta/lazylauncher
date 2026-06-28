@@ -8,7 +8,7 @@ from .deps import resolve_order
 from .sorting import sort_scripts
 from .ui_shared import (
     _TIP_SORT_NAME_AZ, _TIP_SORT_NAME_ZA,
-    _TIP_RUNNING_FIRST, _TIP_STOPPED_FIRST,
+    _TIP_RUNNING_FIRST, _TIP_STOPPED_FIRST, make_icon_button,
 )
 
 
@@ -286,11 +286,9 @@ class GroupRow(Gtk.ListBoxRow):
             ("▶↑", "running_first", _TIP_RUNNING_FIRST),
             ("■↑", "stopped_first", _TIP_STOPPED_FIRST),
         ]:
-            btn = Gtk.Button(label=label)
-            btn.get_style_context().add_class("btn-icon")
-            btn.set_tooltip_text(tip)
-            btn.connect("clicked", lambda _, m=mode: self._apply_sort(m))
-            sort_bar.pack_start(btn, False, False, 0)
+            sort_bar.pack_start(
+                make_icon_button(label, tip, lambda _, m=mode: self._apply_sort(m)),
+                False, False, 0)
         return sort_bar
 
     def _build_script_row(self, script):
