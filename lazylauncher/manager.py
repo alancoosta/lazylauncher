@@ -7,17 +7,15 @@ Writes to ~/.config/lazylauncher/.lazylauncher-config.json.
 The tray daemon hot-reloads that file automatically.
 """
 
-import os
 import subprocess
 import sys
 import threading
-import time
 import uuid
 from pathlib import Path
 
 from .common import (
     CONFIG_FILE,
-    config_lock, load_config, save_config, global_env_map,
+    config_lock, load_config, save_config,
     get_error_states, get_running_ids, find_script_pid,
     migrate_state, ensure_seed_config,
     load_ui_state, save_ui_state, scripts_in_group,
@@ -785,7 +783,6 @@ class ManagerWindow(Gtk.ApplicationWindow):
         """Open a terminal in the script's working directory."""
         cwd = script.get("working_dir", str(Path.home()))
         cwd = str(Path(cwd).expanduser())
-        import subprocess
         subprocess.Popen(["x-terminal-emulator"], cwd=cwd)
 
     def _open_script_logs(self, script):
