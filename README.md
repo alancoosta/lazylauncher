@@ -7,7 +7,8 @@
 <p align="center">Manage and run shell scripts. Organize with groups, pin favorites, monitor ports, and run silently.</p>
 
 <p align="center">
-  <img src="assets/demo.png" alt="LazyLauncher Demo" width="1923">
+  <img src="assets/groups-editor.png" alt="LazyLauncher Demo" width="1923">
+  <img src="assets/groups-home.png" alt="LazyLauncher Demo" width="1923">
 </p>
 
 ## Install
@@ -21,6 +22,7 @@ Autostart is set up automatically — just log out and back in after install.
 ## Features
 
 ### Scripts
+
 - Tray menu with all your scripts — click to run in a terminal
 - Manager UI to add, edit, delete, reorder, duplicate scripts
 - Pin scripts as dedicated tray icons
@@ -31,6 +33,7 @@ Autostart is set up automatically — just log out and back in after install.
 - Port monitoring — auto-kill busy ports before running
 
 ### Groups
+
 - Organize scripts into groups
 - Run/Stop all scripts in a group at once
 - **Dependency ordering** — set `depends on` per script; "Run All" starts them in
@@ -43,6 +46,7 @@ Autostart is set up automatically — just log out and back in after install.
 - Port badges visible on each script inside the group card
 
 ### Sorting & Filtering
+
 - Filter scripts and groups by name
 - Sort scripts by name (A-Z / Z-A), port (1-100 / 100-1), or status (running/stopped first)
 - Sort groups by name, script count, or running status
@@ -50,6 +54,7 @@ Autostart is set up automatically — just log out and back in after install.
 - Manual reorder with up/down buttons
 
 ### General
+
 - Import/export config between machines
 - Hot-reload — tray updates when you save
 - Login-shell toggle per script (source `~/.profile` / `~/.bashrc`, or run a clean deterministic shell)
